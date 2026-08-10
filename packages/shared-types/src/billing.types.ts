@@ -15,12 +15,12 @@ export interface Invoice {
   tax: number;
   total: number;
   status: InvoiceStatus;
-  issuedAt: Date;
-  dueAt: Date;
+  issuedAt: string;
+  dueAt: string;
   items?: InvoiceItem[];
   payments?: Payment[];
-  createdAt: Date;
-  updatedAt: Date;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export type InvoiceStatus = 'unpaid' | 'partial' | 'paid' | 'overdue' | 'cancelled';
@@ -33,7 +33,7 @@ export interface InvoiceItem {
   quantity: number;
   unitPrice: number;
   total: number;
-  createdAt: Date;
+  createdAt: string;
 }
 
 export interface Payment {
@@ -43,9 +43,9 @@ export interface Payment {
   amount: number;
   method: PaymentMethod;
   reference?: string;
-  paidAt: Date;
+  paidAt: string;
   notes?: string;
-  createdAt: Date;
+  createdAt: string;
 }
 
 export type PaymentMethod = 'cash' | 'credit_card' | 'debit_card' | 'insurance' | 'bank_transfer';

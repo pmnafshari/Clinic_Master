@@ -1,29 +1,8 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import type { Appointment, AppointmentStatus } from '@smileflow/shared-types';
 import apiClient from '@/lib/api-client';
 
-export interface Appointment {
-  id: string;
-  patientId: string;
-  patient?: {
-    id: string;
-    firstName: string;
-    lastName: string;
-    phone: string;
-  };
-  providerId: string;
-  provider?: {
-    id: string;
-    firstName: string;
-    lastName: string;
-  };
-  startTime: string;
-  endTime: string;
-  status: 'scheduled' | 'confirmed' | 'in-progress' | 'completed' | 'cancelled' | 'no-show';
-  chairNumber?: string;
-  reason?: string;
-  notes?: string;
-  createdAt: string;
-}
+export type { Appointment, AppointmentStatus };
 
 interface AppointmentFilters {
   providerId?: string;

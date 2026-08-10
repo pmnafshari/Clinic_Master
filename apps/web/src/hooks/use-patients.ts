@@ -1,33 +1,10 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import type { Patient, PaginatedResponse } from '@smileflow/shared-types';
 import apiClient from '@/lib/api-client';
 
-export interface Patient {
-  id: string;
-  firstName: string;
-  lastName: string;
-  email?: string;
-  phone: string;
-  dateOfBirth: string;
-  gender?: string;
-  address?: string;
-  emergencyContact?: string;
-  emergencyPhone?: string;
-  medicalHistory?: string;
-  dentalHistory?: string;
-  allergies?: string;
-  notes?: string;
-  createdAt: string;
-}
+export type { Patient };
 
-interface PatientsResponse {
-  data: Patient[];
-  pagination: {
-    total: number;
-    page: number;
-    limit: number;
-    totalPages: number;
-  };
-}
+type PatientsResponse = PaginatedResponse<Patient>;
 
 export function usePatients(search?: string, page = 1, limit = 20) {
   return useQuery<PatientsResponse>({

@@ -12,8 +12,8 @@ export interface ClinicalChart {
   provider?: User;
   clinicalNotes?: string;
   toothEntries?: ChartToothEntry[];
-  createdAt: Date;
-  updatedAt: Date;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface ChartToothEntry {
@@ -25,7 +25,7 @@ export interface ChartToothEntry {
   procedure?: string;
   status: ToothEntryStatus;
   notes?: string;
-  createdAt: Date;
+  createdAt: string;
 }
 
 export type ToothEntryStatus = 'planned' | 'in-progress' | 'completed';

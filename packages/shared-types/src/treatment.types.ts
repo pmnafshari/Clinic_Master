@@ -12,8 +12,8 @@ export interface TreatmentPlan {
   status: TreatmentPlanStatus;
   estimatedCost?: number;
   items?: TreatmentPlanItem[];
-  createdAt: Date;
-  updatedAt: Date;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export type TreatmentPlanStatus = 'planned' | 'approved' | 'in-progress' | 'completed' | 'cancelled';
@@ -27,7 +27,7 @@ export interface TreatmentPlanItem {
   status: TreatmentItemStatus;
   teethInvolved?: number;
   notes?: string;
-  createdAt: Date;
+  createdAt: string;
 }
 
 export type TreatmentItemStatus = 'planned' | 'approved' | 'completed';

@@ -2,8 +2,8 @@ export interface Role {
   id: string;
   name: string;
   description?: string;
-  createdAt: Date;
-  updatedAt: Date;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface User {
@@ -15,8 +15,8 @@ export interface User {
   isActive: boolean;
   roleId: string;
   role?: Role;
-  createdAt: Date;
-  updatedAt: Date;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface UserWithoutPassword extends Omit<User, 'passwordHash'> {}

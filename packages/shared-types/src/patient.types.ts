@@ -4,7 +4,7 @@ export interface Patient {
   lastName: string;
   email?: string;
   phone: string;
-  dateOfBirth: Date;
+  dateOfBirth: string;
   gender?: string;
   address?: string;
   emergencyContact?: string;
@@ -14,8 +14,8 @@ export interface Patient {
   allergies?: string;
   notes?: string;
   userId?: string;
-  createdAt: Date;
-  updatedAt: Date;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface PatientDocument {
@@ -26,5 +26,5 @@ export interface PatientDocument {
   fileType: string;
   fileSize?: bigint;
   uploadedBy?: string;
-  createdAt: Date;
+  createdAt: string;
 }

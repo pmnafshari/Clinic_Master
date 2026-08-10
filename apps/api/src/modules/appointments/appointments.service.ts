@@ -1,4 +1,5 @@
 import { Injectable, NotFoundException, BadRequestException, ConflictException } from '@nestjs/common';
+import type { AppointmentStatus } from '@smileflow/shared-types';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CreateAppointmentDto } from './dto/create-appointment.dto';
 import { UpdateAppointmentDto } from './dto/update-appointment.dto';
@@ -148,8 +149,17 @@ export class AppointmentsService {
   async updateStatus(id: string, status: string) {
     await this.findById(id);
 
-    const validStatuses = ['scheduled', 'confirmed', 'in-progress', 'completed', 'cancelled', 'no-show'];
-    if (!validStatuses.includes(status)) {
+    // Single source of truth shared with the web client, so adding a status
+    // cannot leave the two sides disagreeing about what is valid.
+    const validStatuses: AppointmentStatus[] = [
+      'scheduled',
+      'confirmed',
+      'in-progress',
+      'completed',
+      'cancelled',
+      'no-show',
+    ];
+    if (!validStatuses.includes(status as AppointmentStatus)) {
       throw new BadRequestException(`Invalid status: ${status}`);
     }
 

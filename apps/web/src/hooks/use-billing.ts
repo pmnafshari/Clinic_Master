@@ -1,45 +1,14 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import type {
+  Invoice,
+  InvoiceItem,
+  InvoiceStatus,
+  Payment,
+  PaymentMethod,
+} from '@smileflow/shared-types';
 import apiClient from '@/lib/api-client';
 
-export interface Invoice {
-  id: string;
-  patientId: string;
-  patient?: {
-    id: string;
-    firstName: string;
-    lastName: string;
-  };
-  invoiceNumber: string;
-  subtotal: number;
-  tax: number;
-  total: number;
-  status: 'unpaid' | 'partial' | 'paid' | 'overdue' | 'cancelled';
-  issuedAt: string;
-  dueAt: string;
-  items?: InvoiceItem[];
-  payments?: Payment[];
-  createdAt: string;
-}
-
-export interface InvoiceItem {
-  id: string;
-  invoiceId: string;
-  description: string;
-  procedureCode?: string;
-  quantity: number;
-  unitPrice: number;
-  total: number;
-}
-
-export interface Payment {
-  id: string;
-  invoiceId: string;
-  amount: number;
-  method: 'cash' | 'credit_card' | 'debit_card' | 'insurance' | 'bank_transfer';
-  reference?: string;
-  paidAt: string;
-  notes?: string;
-}
+export type { Invoice, InvoiceItem, InvoiceStatus, Payment, PaymentMethod };
 
 export function useInvoices(patientId?: string, status?: string) {
   return useQuery<Invoice[]>({

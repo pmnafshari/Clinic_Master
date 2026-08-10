@@ -8,14 +8,14 @@ export interface Appointment {
   providerId: string;
   provider?: User;
   treatmentPlanId?: string;
-  startTime: Date;
-  endTime: Date;
+  startTime: string;
+  endTime: string;
   status: AppointmentStatus;
   chairNumber?: string;
   reason?: string;
   notes?: string;
-  createdAt: Date;
-  updatedAt: Date;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export type AppointmentStatus =
@@ -33,5 +33,5 @@ export interface ProviderAvailability {
   startTime: string;
   endTime: string;
   isAvailable: boolean;
-  createdAt: Date;
+  createdAt: string;
 }

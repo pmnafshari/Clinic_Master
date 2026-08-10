@@ -28,9 +28,9 @@ export interface Notification {
   subject: string;
   content: string;
   status: NotificationStatus;
-  scheduledAt?: Date;
-  sentAt?: Date;
-  createdAt: Date;
+  scheduledAt?: string;
+  sentAt?: string;
+  createdAt: string;
 }
 
 export type NotificationType =
@@ -53,5 +53,5 @@ export interface AuditLog {
   oldValues?: Record<string, any>;
   newValues?: Record<string, any>;
   ipAddress?: string;
-  createdAt: Date;
+  createdAt: string;
 }
