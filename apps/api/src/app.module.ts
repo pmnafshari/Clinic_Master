@@ -13,6 +13,7 @@ import { NotificationsModule } from './modules/notifications/notifications.modul
 import { ReportingModule } from './modules/reporting/reporting.module';
 import { PortalModule } from './modules/portal/portal.module';
 import { AuditModule } from './modules/audit/audit.module';
+import { VoiceModule } from './modules/voice/voice.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { AuditInterceptor } from './common/interceptors/audit.interceptor';
 
@@ -38,6 +39,7 @@ import { AuditInterceptor } from './common/interceptors/audit.interceptor';
     ReportingModule,
     PortalModule,
     AuditModule,
+    VoiceModule,
   ],
   providers: [
     {
