@@ -1,5 +1,18 @@
 {
   "$schema": "https://turbo.build/schema.json",
+  "//": "Turborepo 2 runs tasks in strict env mode, so any variable a task needs must be declared here or it is filtered out of the child process.",
+  "globalEnv": [
+    "NODE_ENV",
+    "DATABASE_URL",
+    "REDIS_URL",
+    "JWT_SECRET",
+    "JWT_REFRESH_SECRET",
+    "JWT_EXPIRATION",
+    "FRONTEND_URL",
+    "PORT",
+    "INVOICE_TAX_RATE",
+    "NEXT_PUBLIC_API_URL"
+  ],
   "tasks": {
     "build": {
       "dependsOn": ["^build"],

@@ -20,6 +20,20 @@ function daysAgo(days: number, hours = 10, minutes = 0): Date {
 async function main() {
   console.log('Seeding database...');
 
+  // Roles, users and patients below are upserted, but the transactional demo
+  // records are created outright and carry fixed identifiers. Clearing them
+  // first keeps the seed re-runnable instead of failing on a unique conflict
+  // the second time it is run. Order matters: children before parents.
+  await prisma.notification.deleteMany();
+  await prisma.payment.deleteMany();
+  await prisma.invoiceItem.deleteMany();
+  await prisma.invoice.deleteMany();
+  await prisma.chartToothEntry.deleteMany();
+  await prisma.clinicalChart.deleteMany();
+  await prisma.treatmentPlanItem.deleteMany();
+  await prisma.treatmentPlan.deleteMany();
+  await prisma.appointment.deleteMany();
+
   // --- Roles ---
   const roles = await Promise.all([
     prisma.role.upsert({ where: { name: 'admin' }, update: {}, create: { name: 'admin', description: 'Clinic Administrator' } }),
