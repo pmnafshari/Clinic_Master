@@ -52,10 +52,23 @@ jobs:
           node-version: '18'
           cache: 'npm'
       - run: npm ci
+
+      # The API suite runs against a real database, so the schema has to exist
+      # and the demo roles/users have to be seeded before any test runs.
+      # `migrate deploy` rather than `migrate dev` — CI must not author migrations.
+      - name: Prepare test database
+        run: |
+          npx prisma generate --schema apps/api/prisma/schema.prisma
+          npx prisma migrate deploy --schema apps/api/prisma/schema.prisma
+          npm run db:seed
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/smileflow_test?schema=public
+
       - run: npm run test
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/smileflow_test?schema=public
           JWT_SECRET: test-secret-key-for-ci
+          JWT_REFRESH_SECRET: test-refresh-key-for-ci
           REDIS_URL: redis://localhost:6379
 
   build:
@@ -69,4 +82,8 @@ jobs:
           node-version: '18'
           cache: 'npm'
       - run: npm ci
+      # The Nest build needs the generated Prisma client types.
+      - run: npx prisma generate --schema apps/api/prisma/schema.prisma
       - run: npm run build
+        env:
+          NEXT_PUBLIC_API_URL: http://localhost:3001/api

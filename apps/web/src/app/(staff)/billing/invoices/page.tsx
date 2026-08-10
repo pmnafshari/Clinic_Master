@@ -66,14 +66,10 @@ export default function InvoicesPage() {
     if (!validate()) return;
     setNewError(null);
     const amount = parseFloat(newAmount);
-    const tax = amount * 0.08;
     createInvoice.mutate(
       {
         patientId: newPatientId,
-        subtotal: amount,
-        tax,
-        total: amount + tax,
-        items: [{ description: newDescription, quantity: 1, unitPrice: amount, total: amount }],
+        items: [{ description: newDescription, quantity: 1, unitPrice: amount }],
       },
       {
         onSuccess: () => {

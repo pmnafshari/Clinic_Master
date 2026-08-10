@@ -63,12 +63,10 @@ export function useCreateInvoice() {
   const queryClient = useQueryClient();
 
   return useMutation({
+    // Subtotal, tax and total are calculated by the API from these items.
     mutationFn: (data: {
       patientId: string;
-      subtotal: number;
-      tax: number;
-      total: number;
-      items?: { description: string; quantity?: number; unitPrice: number; total: number }[];
+      items: { description: string; quantity?: number; unitPrice: number }[];
       treatmentPlanId?: string;
       appointmentId?: string;
     }) => apiClient.post('/billing/invoices', data),

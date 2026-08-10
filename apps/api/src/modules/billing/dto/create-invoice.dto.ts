@@ -1,4 +1,14 @@
-import { IsString, IsNumber, Min, Max, IsOptional, IsArray, ValidateNested, MaxLength } from 'class-validator';
+import {
+  IsString,
+  IsNumber,
+  Min,
+  Max,
+  IsOptional,
+  IsArray,
+  ArrayNotEmpty,
+  ValidateNested,
+  MaxLength,
+} from 'class-validator';
 import { Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
@@ -26,12 +36,6 @@ export class CreateInvoiceItemDto {
   @Min(0.01, { message: 'Unit price must be greater than $0.00' })
   @Max(1000000, { message: 'Unit price must be at most $1,000,000' })
   unitPrice: number;
-
-  @ApiProperty({ example: 850.0 })
-  @IsNumber({}, { message: 'Total must be a number' })
-  @Min(0.01, { message: 'Total must be greater than $0.00' })
-  @Max(1000000, { message: 'Total must be at most $1,000,000' })
-  total: number;
 }
 
 export class CreateInvoiceDto {
@@ -49,29 +53,14 @@ export class CreateInvoiceDto {
   @IsString()
   appointmentId?: string;
 
-  @ApiProperty({ example: 850.0 })
-  @IsNumber({}, { message: 'Subtotal must be a number' })
-  @Min(0.01, { message: 'Subtotal must be greater than $0.00' })
-  @Max(1000000, { message: 'Subtotal must be at most $1,000,000' })
-  subtotal: number;
+  // subtotal, tax and total are intentionally absent: they are derived from
+  // the line items on the server. Accepting them from the client would let a
+  // caller invoice themselves for any amount they like.
 
-  @ApiPropertyOptional({ example: 68.0 })
-  @IsOptional()
-  @IsNumber({}, { message: 'Tax must be a number' })
-  @Min(0, { message: 'Tax cannot be negative' })
-  @Max(100000, { message: 'Tax must be at most $100,000' })
-  tax?: number;
-
-  @ApiProperty({ example: 918.0 })
-  @IsNumber({}, { message: 'Total must be a number' })
-  @Min(0.01, { message: 'Total must be greater than $0.00' })
-  @Max(1000000, { message: 'Total must be at most $1,000,000' })
-  total: number;
-
-  @ApiPropertyOptional({ type: [CreateInvoiceItemDto] })
-  @IsOptional()
+  @ApiProperty({ type: [CreateInvoiceItemDto] })
   @IsArray()
+  @ArrayNotEmpty({ message: 'An invoice must contain at least one line item' })
   @ValidateNested({ each: true })
   @Type(() => CreateInvoiceItemDto)
-  items?: CreateInvoiceItemDto[];
+  items: CreateInvoiceItemDto[];
 }
