@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Modal } from '@/components/ui/modal';
+import { Modal, ModalContent, ModalTitle } from '@/components/ui/modal';
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Label } from '@/components/ui/label';
@@ -87,7 +87,7 @@ describe('UI Components', () => {
       const { rerender } = render(<Badge variant="success">Success</Badge>);
       expect(screen.getByText('Success')).toBeInTheDocument();
       
-      rerender(<Badge variant="error">Error</Badge>);
+      rerender(<Badge variant="destructive">Error</Badge>);
       expect(screen.getByText('Error')).toBeInTheDocument();
       
       rerender(<Badge variant="warning">Warning</Badge>);
@@ -96,19 +96,25 @@ describe('UI Components', () => {
   });
 
   describe('Modal', () => {
-    it('renders when open', () => {
+    it('renders content when open', () => {
       render(
-        <Modal open={true} onClose={() => {}}>
-          <p>Modal content</p>
+        <Modal open onOpenChange={() => {}}>
+          <ModalContent>
+            <ModalTitle>Confirm</ModalTitle>
+            <p>Modal content</p>
+          </ModalContent>
         </Modal>
       );
       expect(screen.getByText('Modal content')).toBeInTheDocument();
     });
 
-    it('does not render when closed', () => {
+    it('does not render content when closed', () => {
       render(
-        <Modal open={false} onClose={() => {}}>
-          <p>Modal content</p>
+        <Modal open={false} onOpenChange={() => {}}>
+          <ModalContent>
+            <ModalTitle>Confirm</ModalTitle>
+            <p>Modal content</p>
+          </ModalContent>
         </Modal>
       );
       expect(screen.queryByText('Modal content')).not.toBeInTheDocument();
