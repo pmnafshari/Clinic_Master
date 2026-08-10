@@ -138,4 +138,82 @@ describe('Appointments (e2e)', () => {
         });
     });
   });
+
+  describe('double-booking under concurrency', () => {
+    // Every booking made here is cancelled afterwards. The exclusion
+    // constraint ignores cancelled rows, so this frees the slot and keeps the
+    // suite repeatable against a database that is not reset between runs.
+    const createdIds: string[] = [];
+
+    const slot = (dayOffset: number, hour: number) => {
+      const start = new Date();
+      start.setDate(start.getDate() + dayOffset);
+      start.setHours(hour, 0, 0, 0);
+      const end = new Date(start.getTime() + 30 * 60 * 1000);
+      return { startTime: start.toISOString(), endTime: end.toISOString() };
+    };
+
+    const book = async (times: { startTime: string; endTime: string }) => {
+      const res = await request(app.getHttpServer())
+        .post('/api/appointments')
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ patientId, providerId, ...times });
+      if (res.body?.id) createdIds.push(res.body.id);
+      return res;
+    };
+
+    afterAll(async () => {
+      await Promise.all(
+        createdIds.map((id) =>
+          request(app.getHttpServer())
+            .delete(`/api/appointments/${id}`)
+            .set('Authorization', `Bearer ${adminToken}`)
+        )
+      );
+    });
+
+    it('accepts only one of two simultaneous bookings for the same slot', async () => {
+      const times = slot(21, 9);
+
+      // Both requests check availability before either commits. Without the
+      // serializable transaction and the exclusion constraint, both succeed.
+      const results = await Promise.allSettled([book(times), book(times)]);
+
+      const created = results.filter(
+        (r) => r.status === 'fulfilled' && r.value.status === 201
+      );
+      expect(created).toHaveLength(1);
+
+      const listed = await request(app.getHttpServer())
+        .get('/api/appointments')
+        .set('Authorization', `Bearer ${adminToken}`)
+        .query({ providerId });
+
+      const overlapping = listed.body.filter(
+        (a: { startTime: string; status: string }) =>
+          a.status !== 'cancelled' && a.startTime === times.startTime
+      );
+      expect(overlapping).toHaveLength(1);
+    });
+
+    it('allows a back-to-back booking that only touches at the boundary', async () => {
+      const first = slot(22, 9);
+      const second = {
+        startTime: first.endTime,
+        endTime: new Date(new Date(first.endTime).getTime() + 30 * 60 * 1000).toISOString(),
+      };
+
+      expect((await book(first)).status).toBe(201);
+      expect((await book(second)).status).toBe(201);
+    });
+
+    it('rejects an appointment that ends before it starts', async () => {
+      const times = slot(23, 9);
+      await request(app.getHttpServer())
+        .post('/api/appointments')
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ patientId, providerId, startTime: times.endTime, endTime: times.startTime })
+        .expect(400);
+    });
+  });
 });

@@ -1,7 +1,27 @@
 import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 
+/** Postgres SQLSTATEs for constraints Prisma does not model. */
+const EXCLUSION_VIOLATION = '23P01';
+const CHECK_VIOLATION = '23514';
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : typeof error === 'string' ? error : '';
+}
+
 export function handlePrismaError(error: unknown): never {
+  // Exclusion and check constraints are enforced by the database but are not
+  // part of the Prisma schema, so they arrive without a mapped error code.
+  const message = messageOf(error);
+
+  if (message.includes(EXCLUSION_VIOLATION) || message.includes('exclusion constraint')) {
+    throw new ConflictException('That time slot conflicts with an existing appointment');
+  }
+
+  if (message.includes(CHECK_VIOLATION) || message.includes('check constraint')) {
+    throw new BadRequestException('A field was set to a value the database does not allow');
+  }
+
   if (error instanceof Prisma.PrismaClientKnownRequestError) {
     switch (error.code) {
       case 'P2002':

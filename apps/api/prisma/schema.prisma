@@ -1,3 +1,12 @@
+// Some guarantees in this database are not expressible in the Prisma schema
+// and live in hand-written migrations instead. Prisma will not recreate them
+// if you reset from schema alone — always migrate.
+//
+//   20260810160000_appointment_no_overlap
+//     EXCLUDE constraint stopping a provider being double-booked.
+//   20260810170000_status_check_constraints
+//     CHECK constraints pinning status/method columns to their value sets.
+
 generator client {
   provider = "prisma-client-js"
 }

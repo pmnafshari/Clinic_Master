@@ -1,4 +1,5 @@
 import { Injectable, NotFoundException, BadRequestException, ConflictException } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import type { AppointmentStatus } from '@smileflow/shared-types';
 import { PrismaService } from '../../prisma/prisma.service';
 import { CreateAppointmentDto } from './dto/create-appointment.dto';
@@ -63,85 +64,121 @@ export class AppointmentsService {
 
   async create(createAppointmentDto: CreateAppointmentDto) {
     const { patientId, providerId, startTime, endTime } = createAppointmentDto;
+    const start = new Date(startTime);
+    const end = new Date(endTime);
 
-    const conflict = await this.prisma.appointment.findFirst({
-      where: {
-        providerId,
-        status: { notIn: ['cancelled'] },
-        OR: [
-          {
-            startTime: { lt: new Date(endTime) },
-            endTime: { gt: new Date(startTime) },
-          },
-        ],
-      },
-    });
-
-    if (conflict) {
-      throw new ConflictException('Provider has a conflicting appointment');
+    if (end <= start) {
+      throw new BadRequestException('Appointment must end after it starts');
     }
 
     try {
-      return await this.prisma.appointment.create({
-        data: {
-          patientId,
-          providerId,
-          startTime: new Date(startTime),
-          endTime: new Date(endTime),
-          status: createAppointmentDto.status || 'scheduled',
-          chairNumber: createAppointmentDto.chairNumber,
-          reason: createAppointmentDto.reason,
-          notes: createAppointmentDto.notes,
-          treatmentPlanId: createAppointmentDto.treatmentPlanId,
+      // The conflict check and the insert run in one serializable transaction
+      // so they cannot interleave with a competing booking. The database also
+      // enforces an exclusion constraint as a backstop — see the
+      // 20260810160000_appointment_no_overlap migration.
+      return await this.prisma.$transaction(
+        async (tx) => {
+          const conflict = await tx.appointment.findFirst({
+            where: {
+              providerId,
+              status: { notIn: ['cancelled'] },
+              startTime: { lt: end },
+              endTime: { gt: start },
+            },
+          });
+
+          if (conflict) {
+            throw new ConflictException('Provider has a conflicting appointment');
+          }
+
+          return await tx.appointment.create({
+            data: {
+              patientId,
+              providerId,
+              startTime: start,
+              endTime: end,
+              status: createAppointmentDto.status || 'scheduled',
+              chairNumber: createAppointmentDto.chairNumber,
+              reason: createAppointmentDto.reason,
+              notes: createAppointmentDto.notes,
+              treatmentPlanId: createAppointmentDto.treatmentPlanId,
+            },
+            include: {
+              patient: true,
+              provider: { select: USER_PROVIDER_SELECT },
+            },
+          });
         },
-        include: {
-          patient: true,
-          provider: { select: USER_PROVIDER_SELECT },
-        },
-      });
+        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
+      );
     } catch (error) {
+      if (error instanceof ConflictException || error instanceof BadRequestException) {
+        throw error;
+      }
       handlePrismaError(error);
     }
   }
 
   async update(id: string, updateAppointmentDto: UpdateAppointmentDto) {
-    await this.findById(id);
-
-    if (updateAppointmentDto.startTime && updateAppointmentDto.endTime) {
-      const appointment = await this.findById(id);
-      const conflict = await this.prisma.appointment.findFirst({
-        where: {
-          providerId: updateAppointmentDto.providerId || appointment.providerId,
-          id: { not: id },
-          status: { notIn: ['cancelled'] },
-          OR: [
-            {
-              startTime: { lt: new Date(updateAppointmentDto.endTime) },
-              endTime: { gt: new Date(updateAppointmentDto.startTime) },
-            },
-          ],
-        },
-      });
-
-      if (conflict) {
-        throw new ConflictException('Provider has a conflicting appointment');
-      }
-    }
-
     try {
-      return await this.prisma.appointment.update({
-        where: { id },
-        data: {
-          ...updateAppointmentDto,
-          startTime: updateAppointmentDto.startTime ? new Date(updateAppointmentDto.startTime) : undefined,
-          endTime: updateAppointmentDto.endTime ? new Date(updateAppointmentDto.endTime) : undefined,
+      return await this.prisma.$transaction(
+        async (tx) => {
+          const appointment = await tx.appointment.findUnique({ where: { id } });
+          if (!appointment) {
+            throw new NotFoundException('Appointment not found');
+          }
+
+          // A move only needs a conflict check when it actually changes the
+          // provider or the time window.
+          const start = updateAppointmentDto.startTime
+            ? new Date(updateAppointmentDto.startTime)
+            : appointment.startTime;
+          const end = updateAppointmentDto.endTime
+            ? new Date(updateAppointmentDto.endTime)
+            : appointment.endTime;
+          const providerId = updateAppointmentDto.providerId || appointment.providerId;
+
+          if (end <= start) {
+            throw new BadRequestException('Appointment must end after it starts');
+          }
+
+          const conflict = await tx.appointment.findFirst({
+            where: {
+              providerId,
+              id: { not: id },
+              status: { notIn: ['cancelled'] },
+              startTime: { lt: end },
+              endTime: { gt: start },
+            },
+          });
+
+          if (conflict) {
+            throw new ConflictException('Provider has a conflicting appointment');
+          }
+
+          return await tx.appointment.update({
+            where: { id },
+            data: {
+              ...updateAppointmentDto,
+              startTime: updateAppointmentDto.startTime ? start : undefined,
+              endTime: updateAppointmentDto.endTime ? end : undefined,
+            },
+            include: {
+              patient: true,
+              provider: { select: USER_PROVIDER_SELECT },
+            },
+          });
         },
-        include: {
-          patient: true,
-          provider: { select: USER_PROVIDER_SELECT },
-        },
-      });
+        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
+      );
     } catch (error) {
+      if (
+        error instanceof ConflictException ||
+        error instanceof BadRequestException ||
+        error instanceof NotFoundException
+      ) {
+        throw error;
+      }
       handlePrismaError(error);
     }
   }
