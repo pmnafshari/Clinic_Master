@@ -168,15 +168,24 @@ The codebase went through a dedicated security review and remediation pass; find
 - Replace the default `postgres:postgres` database credentials.
 - Never commit `.env` files. Only `.env.example` is tracked, and `.gitignore` is configured to keep it that way.
 
+## Data integrity
+
+Two guarantees are enforced by Postgres rather than by application code, so they hold even if a caller bypasses the service layer:
+
+- **No double-booking.** An `EXCLUDE USING gist` constraint on `Appointment` makes overlapping non-cancelled appointments for the same provider impossible. Ranges are half-open, so a 09:30 appointment may follow one ending at 09:30. The service also runs its conflict check and insert in a single serializable transaction, so the common case returns a clean `409` rather than a raw constraint error.
+- **Valid status values.** `CHECK` constraints pin `status` and `method` columns to the value sets declared in `@smileflow/shared-types`.
+
+Both live in hand-written migrations that Prisma cannot regenerate from `schema.prisma` alone — always run `db:migrate` rather than pushing the schema.
+
+Money is handled with `Decimal` end to end. Invoice totals are derived from line items on the server, and payments are recorded at `Serializable` isolation so concurrent payments cannot overpay an invoice.
+
 ## Known gaps
 
 Tracked deliberately rather than left unsaid. These are the next things I would address:
 
 - **Rendering strategy.** Every page is a client component. Read-heavy routes (patient list, reports) should fetch on the server; this is the main refactor outstanding.
 - **Token storage.** Access and refresh tokens live in `localStorage`, which is readable by any injected script. `httpOnly` cookies are the correct home for them in an application holding patient records.
-- **Status columns are strings.** `status` on appointments and invoices should be a Prisma enum so the database rejects invalid values, rather than relying on service-level checks.
 - **Pagination.** Implemented for patients; invoices and appointments still return the full table.
-- **Scheduling concurrency.** Appointment conflict detection reads before it writes without a transaction, so a double booking is reachable under simultaneous requests. Billing has been fixed this way; scheduling has not yet.
 - **Timezones.** Provider availability assumes the server's local timezone and a fixed 08:00–18:00 day.
 - **Accessibility.** Radix primitives supply keyboard and focus behaviour, but the app has had no dedicated a11y pass.
 - **Type-safety debt.** 31 `no-explicit-any` warnings in the API, surfaced by lint rather than suppressed.
