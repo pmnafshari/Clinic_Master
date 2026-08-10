@@ -84,7 +84,7 @@ Two tiers. The tier split is enforced **in the tool handler, server-side**. It i
 | Tool | Behaviour |
 |---|---|
 | `get_clinic_info` | Hours, address, parking, appointment prep |
-| `get_service_pricing` | Published price ranges — public information |
+| `get_service_pricing` | Published price ranges — public information. Stays Tier 1 **only while pricing is published and identical for everyone**; if patient-specific or insurance-adjusted pricing is introduced, this tool moves to Tier 2 |
 | `check_availability` | Wraps `GET /appointments/availability`; returns slots only, no patient data |
 | `start_patient_intake` | Captures name, DOB, phone, reason; creates `Patient` + `User` |
 | `book_appointment` | Restricted to the patient created in *this* session |
@@ -198,6 +198,17 @@ Logistics only: preparation, aftercare, hours, cost ranges. Never diagnosis, tri
 | Transcript replay | Scripted conversations with **STT mocked** — the agent loop runs in CI with no audio |
 
 **CI economics:** the Anthropic client is mocked for the main suite so pull requests stay free and deterministic. A small **nightly** suite runs against the real API to catch model-behaviour drift.
+
+### Nightly suite cost controls
+
+The nightly suite must not be able to generate an unexpected provider bill. Four limits, all enforced in the job rather than by convention:
+
+1. **Only the model is real.** STT and TTS stay mocked even at night — the suite tests agent reasoning and tool selection, not audio transport. This bounds nightly spend to Anthropic alone; Deepgram, ElevenLabs, and Twilio are never called by CI.
+2. **Fixed scenario count.** The nightly set is a committed, enumerated list of scenarios. Growth is a reviewed change to that list, not an accident of adding a test file.
+3. **Hard token ceiling per run.** Each call sets an explicit `max_tokens`; the harness accumulates `response.usage` across the run and **fails the job** if the total crosses a configured budget. The failure is the control — a runaway loop stops the job rather than silently spending.
+4. **Job timeout and concurrency of 1.** No overlapping nightly runs, and a wall-clock cap so a hung run cannot bill indefinitely.
+
+A provider-side spend alert is configured as a backstop, but is not the primary control — the in-harness budget assertion is.
 
 **Latency is measured and reported, not asserted** — a timing assertion in CI is a flake generator.
 
