@@ -1,5 +1,7 @@
 # SmileFlow — Dental Clinic Management Platform
 
+[![CI](https://github.com/pmnafshari/Clinic_Master/actions/workflows/ci.yml/badge.svg)](https://github.com/pmnafshari/Clinic_Master/actions/workflows/ci.yml)
+
 A full-stack web application for running a small to mid-size dental clinic: appointment booking, patient records, dental charting, treatment planning, billing, and a patient-facing portal — in one system.
 
 Built as a production-style MVP with Next.js, NestJS, PostgreSQL, and Prisma in a Turborepo monorepo.
@@ -123,7 +125,7 @@ Created by the seed script. These are local demo credentials for a throwaway dat
 | `npm run db:down` | Stop the containers |
 | `npm run db:migrate` | Apply Prisma migrations |
 | `npm run db:generate` | Regenerate the Prisma client |
-| `npm run db:seed` | Load demo data |
+| `npm run db:seed` | Load demo data (safe to re-run) |
 
 Run a single workspace directly with `npm run test --workspace=@smileflow/api`.
 
@@ -165,6 +167,19 @@ The codebase went through a dedicated security review and remediation pass; find
 - Replace `JWT_SECRET` and `JWT_REFRESH_SECRET` with strong random values. The defaults in `.env.example` and `docker/docker-compose.yml` are development placeholders and are intentionally obvious.
 - Replace the default `postgres:postgres` database credentials.
 - Never commit `.env` files. Only `.env.example` is tracked, and `.gitignore` is configured to keep it that way.
+
+## Known gaps
+
+Tracked deliberately rather than left unsaid. These are the next things I would address:
+
+- **Rendering strategy.** Every page is a client component. Read-heavy routes (patient list, reports) should fetch on the server; this is the main refactor outstanding.
+- **Token storage.** Access and refresh tokens live in `localStorage`, which is readable by any injected script. `httpOnly` cookies are the correct home for them in an application holding patient records.
+- **Status columns are strings.** `status` on appointments and invoices should be a Prisma enum so the database rejects invalid values, rather than relying on service-level checks.
+- **Pagination.** Implemented for patients; invoices and appointments still return the full table.
+- **Scheduling concurrency.** Appointment conflict detection reads before it writes without a transaction, so a double booking is reachable under simultaneous requests. Billing has been fixed this way; scheduling has not yet.
+- **Timezones.** Provider availability assumes the server's local timezone and a fixed 08:00–18:00 day.
+- **Accessibility.** Radix primitives supply keyboard and focus behaviour, but the app has had no dedicated a11y pass.
+- **Type-safety debt.** 31 `no-explicit-any` warnings in the API, surfaced by lint rather than suppressed.
 
 ## Documentation
 
