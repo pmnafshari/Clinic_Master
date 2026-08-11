@@ -84,10 +84,15 @@ describe('tool authorization — model-controlled input cannot influence identit
   });
 
   /** Captures exactly what the executor handed the tool. */
-  function recordingTool(name: string, tier: 'public' | 'verified') {
+  function recordingTool(
+    name: string,
+    tier: 'public' | 'verified',
+    needsPatientContext?: boolean
+  ) {
     const seen: { input?: Record<string, unknown>; session?: VoiceSession } = {};
     const tool: VoiceTool = {
       ...stubTool(name, tier),
+      ...(needsPatientContext === undefined ? {} : { needsPatientContext }),
       execute: async (input, session) => {
         seen.input = input;
         seen.session = session;
@@ -98,7 +103,9 @@ describe('tool authorization — model-controlled input cannot influence identit
   }
 
   it('ignores patientId / patient_id / userId injected into input by the model', async () => {
-    const { tool, seen } = recordingTool('read_patient_thing', 'verified');
+    // Declares the capability, so it is *entitled* to patient context. Even
+    // then, the patient it gets is the session's — never the injected one.
+    const { tool, seen } = recordingTool('read_patient_thing', 'verified', true);
     registry.register(tool);
 
     const session = createVerifiedSession('s1', 'u1', 'p1');
@@ -201,5 +208,175 @@ describe('tool authorization — model-controlled input cannot influence identit
       expect(['public', 'verified']).toContain(tool.tier);
     }
     expect(registry.verifiedTools().map((tool) => tool.name)).toEqual(['private_thing']);
+  });
+});
+
+/**
+ * Patient context is a capability a tool must ask for by name. A tool that does
+ * not declare `needsPatientContext: true` is handed a session with no identity
+ * in it, so it cannot leak or act on a patient even inside a verified session.
+ */
+describe('tool authorization — patient context is gated behind an explicit capability', () => {
+  let registry: ToolRegistryService;
+  let executor: ToolExecutorService;
+
+  beforeEach(() => {
+    registry = new ToolRegistryService();
+    executor = new ToolExecutorService(registry);
+  });
+
+  function recordingTool(
+    name: string,
+    tier: 'public' | 'verified',
+    needsPatientContext?: boolean
+  ) {
+    const seen: { session?: VoiceSession } = {};
+    const tool: VoiceTool = {
+      ...stubTool(name, tier),
+      ...(needsPatientContext === undefined ? {} : { needsPatientContext }),
+      execute: async (_input, session) => {
+        seen.session = session;
+        return { status: 'ok', ran: true };
+      },
+    };
+    return { tool, seen };
+  }
+
+  it('withholds patient identity from a tool that does not declare the capability', async () => {
+    const { tool, seen } = recordingTool('no_flag_thing', 'verified');
+    registry.register(tool);
+
+    const result = await executor.execute(
+      'no_flag_thing',
+      {},
+      createVerifiedSession('s1', 'u1', 'p1')
+    );
+
+    expect(result.status).toBe('ok');
+    expect(seen.session?.patientId).toBeNull();
+    expect(seen.session?.userId).toBeNull();
+  });
+
+  it('keeps sessionId and turnIndex in the narrowed session', async () => {
+    const { tool, seen } = recordingTool('no_flag_thing', 'verified');
+    registry.register(tool);
+
+    const session = createVerifiedSession('s-abc', 'u1', 'p1');
+    session.turnIndex = 7;
+    await executor.execute('no_flag_thing', {}, session);
+
+    // A later task derives idempotency keys from these — narrowing must not
+    // take them away.
+    expect(seen.session?.sessionId).toBe('s-abc');
+    expect(seen.session?.turnIndex).toBe(7);
+    // The tier decision was made on the real session, so this stays true.
+    expect(seen.session?.identityVerified).toBe(true);
+  });
+
+  it('gives patient identity to a tool that declares the capability', async () => {
+    const { tool, seen } = recordingTool('needs_patient', 'verified', true);
+    registry.register(tool);
+
+    const result = await executor.execute(
+      'needs_patient',
+      {},
+      createVerifiedSession('s1', 'u1', 'p1')
+    );
+
+    expect(result.status).toBe('ok');
+    expect(seen.session?.patientId).toBe('p1');
+    expect(seen.session?.userId).toBe('u1');
+  });
+
+  it('hands a capability-declaring tool the real session object, so its writes survive', async () => {
+    const seen: { session?: VoiceSession } = {};
+    registry.register({
+      ...stubTool('start_patient_intake', 'public'),
+      needsPatientContext: true,
+      execute: async (_input, session) => {
+        seen.session = session;
+        // The intake tool writes the patient it just created back onto the
+        // session so a later book_appointment call can use it.
+        session.patientId = 'written-by-tool';
+        return { status: 'ok', ran: true };
+      },
+    });
+
+    const session = createAnonymousSession('s1');
+    await executor.execute('start_patient_intake', {}, session);
+
+    // Same object, not a clone — otherwise the write above vanishes and the
+    // anonymous intake -> book flow breaks silently.
+    expect(seen.session).toBe(session);
+    expect(session.patientId).toBe('written-by-tool');
+  });
+
+  it('narrowing does not mutate the caller session', async () => {
+    const { tool } = recordingTool('no_flag_thing', 'verified');
+    registry.register(tool);
+
+    const session = createVerifiedSession('s1', 'u1', 'p1');
+    await executor.execute('no_flag_thing', {}, session);
+
+    expect(session.patientId).toBe('p1');
+    expect(session.userId).toBe('u1');
+    expect(session.identityVerified).toBe(true);
+  });
+
+  it('keeps the tier gate unchanged for flagged and unflagged tools', async () => {
+    const flagged = recordingTool('needs_patient', 'verified', true);
+    const unflagged = recordingTool('no_flag_thing', 'verified');
+    registry.register(flagged.tool);
+    registry.register(unflagged.tool);
+
+    const anon = createAnonymousSession('s1');
+
+    const flaggedResult = await executor.execute('needs_patient', {}, anon);
+    expect(flaggedResult.status).toBe('failed');
+    expect(flaggedResult.error).toBe('verification_required');
+    expect(flagged.seen.session).toBeUndefined();
+
+    const unflaggedResult = await executor.execute('no_flag_thing', {}, anon);
+    expect(unflaggedResult.status).toBe('failed');
+    expect(unflaggedResult.error).toBe('verification_required');
+    expect(unflagged.seen.session).toBeUndefined();
+  });
+
+  it('fails closed: an unflagged tool sees no patient and cannot recover one', async () => {
+    // A tool that forgot the flag but expects a patient must fail, not operate
+    // on some other patient recovered from input.
+    registry.register({
+      ...stubTool('forgot_the_flag', 'verified'),
+      execute: async (_input, session) => {
+        if (!session.patientId) {
+          return { status: 'failed', error: 'no_patient_in_session' };
+        }
+        return { status: 'ok', patientId: session.patientId };
+      },
+    });
+
+    const result = await executor.execute(
+      'forgot_the_flag',
+      { patientId: 'p-victim', patient_id: 'p-victim' },
+      createVerifiedSession('s1', 'u1', 'p1')
+    );
+
+    expect(result.status).toBe('failed');
+    expect(result.error).toBe('no_patient_in_session');
+  });
+
+  it('never exposes a patient identifier through any tool inputSchema', () => {
+    registry.register(recordingTool('needs_patient', 'verified', true).tool);
+    registry.register(recordingTool('no_flag_thing', 'verified').tool);
+    registry.register(stubTool('public_thing', 'public'));
+
+    // needsPatientContext is a server-side capability declaration. It must
+    // never become a model-supplied input field.
+    for (const tool of registry.all()) {
+      const properties = (tool.inputSchema.properties ?? {}) as Record<string, unknown>;
+      for (const key of Object.keys(properties)) {
+        expect(['patientId', 'patient_id', 'userId', 'needsPatientContext']).not.toContain(key);
+      }
+    }
   });
 });

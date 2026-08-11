@@ -34,8 +34,24 @@ export class ToolExecutorService {
       return { status: 'failed', error: 'verification_required' };
     }
 
+    /**
+     * Patient identity is a capability a tool must ask for. The tier decision
+     * above used the real session; only what the tool *receives* is narrowed.
+     *
+     * A tool that declares the capability gets the real session object, not a
+     * copy — intake writes `session.patientId` back so the next tool call in
+     * the turn can use it, and a clone would swallow that write. Everything
+     * else gets a projection that keeps `sessionId` and `turnIndex` (later
+     * idempotency keys derive from them) but carries no identity. There is no
+     * fallback that recovers identity: a tool that forgot the flag sees null
+     * and fails, rather than acting on the wrong patient.
+     */
+    const sessionForTool: VoiceSession = tool.needsPatientContext
+      ? session
+      : { ...session, userId: null, patientId: null };
+
     try {
-      return await tool.execute(input, session);
+      return await tool.execute(input, sessionForTool);
     } catch (error) {
       this.logger.error(
         `Tool ${toolName} failed for session ${session.sessionId}`,
