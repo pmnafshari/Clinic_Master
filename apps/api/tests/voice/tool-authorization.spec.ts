@@ -17,6 +17,42 @@ function stubTool(name: string, tier: 'public' | 'verified'): VoiceTool {
   };
 }
 
+/** A tool whose inputSchema declares real properties. */
+function toolWithSchema(
+  name: string,
+  tier: 'public' | 'verified',
+  properties: Record<string, unknown>,
+  needsPatientContext?: boolean
+): VoiceTool {
+  return {
+    ...stubTool(name, tier),
+    ...(needsPatientContext === undefined ? {} : { needsPatientContext }),
+    inputSchema: { type: 'object', properties, additionalProperties: false },
+  };
+}
+
+/**
+ * Identity is resolved server-side from the session, and needsPatientContext is
+ * a server-side capability declaration. None of these may ever be a field the
+ * model gets to fill in.
+ */
+const FORBIDDEN_SCHEMA_KEYS = ['patientId', 'patient_id', 'userId', 'needsPatientContext'];
+
+function schemaProperties(tool: VoiceTool): Record<string, unknown> {
+  return (tool.inputSchema.properties ?? {}) as Record<string, unknown>;
+}
+
+/**
+ * The single schema check, used by both the registry sweep and the negative
+ * cases below, so the negative cases actually prove something about the sweep.
+ * Returns the offending keys — empty means clean.
+ */
+function forbiddenSchemaKeys(tool: VoiceTool): string[] {
+  return Object.keys(schemaProperties(tool)).filter((key) =>
+    FORBIDDEN_SCHEMA_KEYS.includes(key)
+  );
+}
+
 describe('tool authorization', () => {
   let registry: ToolRegistryService;
   let executor: ToolExecutorService;
@@ -366,17 +402,59 @@ describe('tool authorization — patient context is gated behind an explicit cap
   });
 
   it('never exposes a patient identifier through any tool inputSchema', () => {
-    registry.register(recordingTool('needs_patient', 'verified', true).tool);
-    registry.register(recordingTool('no_flag_thing', 'verified').tool);
-    registry.register(stubTool('public_thing', 'public'));
+    // Tools with real schema properties, so the sweep below has something to
+    // inspect. A tool needing patient context declares it server-side and
+    // still takes no identifier as input.
+    registry.register(
+      toolWithSchema(
+        'book_appointment',
+        'verified',
+        { date: { type: 'string' }, time: { type: 'string' } },
+        true
+      )
+    );
+    registry.register(toolWithSchema('clinic_hours', 'public', { day: { type: 'string' } }));
+    registry.register(stubTool('empty_schema_thing', 'public'));
 
-    // needsPatientContext is a server-side capability declaration. It must
-    // never become a model-supplied input field.
+    let inspectedKeys = 0;
     for (const tool of registry.all()) {
-      const properties = (tool.inputSchema.properties ?? {}) as Record<string, unknown>;
-      for (const key of Object.keys(properties)) {
-        expect(['patientId', 'patient_id', 'userId', 'needsPatientContext']).not.toContain(key);
-      }
+      inspectedKeys += Object.keys(schemaProperties(tool)).length;
+      expect(forbiddenSchemaKeys(tool)).toEqual([]);
     }
+
+    // Guard against this test silently going vacuous again: if every registered
+    // tool had an empty schema, the loop above would assert nothing at all.
+    expect(inspectedKeys).toBeGreaterThan(0);
+  });
+
+  it.each(FORBIDDEN_SCHEMA_KEYS)(
+    'detects %s when a tool inputSchema declares it',
+    (forbiddenKey) => {
+      const bad = toolWithSchema('sneaky_tool', 'verified', {
+        date: { type: 'string' },
+        [forbiddenKey]: { type: 'string' },
+      });
+
+      expect(forbiddenSchemaKeys(bad)).toEqual([forbiddenKey]);
+    }
+  );
+
+  it('the registry sweep catches a tool that declares a forbidden key', () => {
+    registry.register(toolWithSchema('clinic_hours', 'public', { day: { type: 'string' } }));
+    registry.register(
+      toolWithSchema('sneaky_tool', 'verified', {
+        date: { type: 'string' },
+        patientId: { type: 'string' },
+        userId: { type: 'string' },
+      })
+    );
+
+    // Same sweep, same helper as the passing test above — so that test's green
+    // is meaningful rather than an artifact of empty schemas.
+    const offenders = registry
+      .all()
+      .flatMap((tool) => forbiddenSchemaKeys(tool).map((key) => `${tool.name}.${key}`));
+
+    expect(offenders).toEqual(['sneaky_tool.patientId', 'sneaky_tool.userId']);
   });
 });
