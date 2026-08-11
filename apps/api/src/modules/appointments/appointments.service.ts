@@ -11,8 +11,18 @@ import { USER_PROVIDER_SELECT } from '../../common/constants/prisma-selects';
 export class AppointmentsService {
   constructor(private prisma: PrismaService) {}
 
-  async findAll(filters?: { providerId?: string; startDate?: string; endDate?: string; status?: string }) {
+  async findAll(filters?: {
+    patientId?: string;
+    providerId?: string;
+    startDate?: string;
+    endDate?: string;
+    status?: string;
+  }) {
     const where: any = {};
+
+    if (filters?.patientId) {
+      where.patientId = filters.patientId;
+    }
 
     if (filters?.providerId) {
       where.providerId = filters.providerId;
