@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { VoiceTool, VoiceToolResult, ToolTier } from './tool-definition.interface';
 import { VoiceSession } from '../session/voice-session';
 import { BillingService } from '../../billing/billing.service';
@@ -26,7 +27,7 @@ export class MyInvoicesTool implements VoiceTool {
     const invoices = (results ?? []).map(
       (invoice: { invoiceNumber: string; total: unknown; status: string; dueAt: Date }) => ({
         invoiceNumber: invoice.invoiceNumber,
-        total: String(invoice.total),
+        total: new Prisma.Decimal(invoice.total as Prisma.Decimal.Value).toFixed(2),
         status: invoice.status,
         dueAt: invoice.dueAt,
       })

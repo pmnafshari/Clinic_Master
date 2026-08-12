@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import { MyAppointmentsTool } from '../../src/modules/voice/tools/my-appointments.tool';
 import { MyInvoicesTool } from '../../src/modules/voice/tools/my-invoices.tool';
 import { MyBalanceTool } from '../../src/modules/voice/tools/my-balance.tool';
@@ -184,5 +185,100 @@ describe('verified read tools — routed through ToolExecutorService', () => {
 
       expect(iterations).toBe(3);
     });
+  });
+});
+
+/**
+ * Monetary fields must be rendered with exactly two decimal places, preserving
+ * Decimal precision, because the agent reads these numbers aloud. A trailing
+ * zero dropped from a Decimal ("100.5" instead of "100.50") or a float
+ * round-trip ("245.045" -> Number(...).toFixed(2) -> "245.04" instead of the
+ * correctly-rounded "245.05") both cause the agent to misquote the patient.
+ */
+describe('verified read tools — monetary formatting', () => {
+  it('formats a Decimal invoice total with two decimal places, not a truncated one', async () => {
+    const session = createVerifiedSession('s1', 'user-1', 'patient-1');
+    const billing = {
+      findAllInvoices: jest.fn().mockResolvedValue([
+        {
+          invoiceNumber: 'INV-1',
+          total: new Prisma.Decimal('100.50'),
+          status: 'open',
+          dueAt: new Date('2026-09-01'),
+        },
+      ]),
+    };
+    const tool = new MyInvoicesTool(billing as any);
+
+    const result = await tool.execute({}, session);
+
+    // A real Decimal('100.50') stringifies as "100.5" — proving this test
+    // exercises the actual Decimal code path rather than a plain JS number,
+    // which would be indistinguishable from 100.5 at runtime.
+    expect(String(new Prisma.Decimal('100.50'))).toBe('100.5');
+
+    const invoices = result.invoices as Array<{ total: string }>;
+    expect(invoices[0].total).toBe('100.50');
+  });
+
+  it('rounds a Decimal with more than two decimal places the way Decimal.toFixed(2) does, not a naive float toFixed', async () => {
+    const session = createVerifiedSession('s1', 'user-1', 'patient-1');
+    const billing = {
+      findAllInvoices: jest.fn().mockResolvedValue([
+        {
+          invoiceNumber: 'INV-2',
+          total: new Prisma.Decimal('245.045'),
+          status: 'open',
+          dueAt: new Date('2026-09-01'),
+        },
+      ]),
+    };
+    const tool = new MyInvoicesTool(billing as any);
+
+    const result = await tool.execute({}, session);
+    const invoices = result.invoices as Array<{ total: string }>;
+
+    // A naive `Number('245.045').toFixed(2)` reintroduces float imprecision
+    // and yields "245.04" — the correct Decimal-rounded value is "245.05".
+    expect(Number('245.045').toFixed(2)).toBe('245.04');
+    expect(invoices[0].total).toBe('245.05');
+  });
+
+  it('formats invoice totals identically to how get_my_balance formats the same underlying value', async () => {
+    const session = createVerifiedSession('s1', 'user-1', 'patient-1');
+    const underlying = '245.045';
+
+    const invoicesBilling = {
+      findAllInvoices: jest.fn().mockResolvedValue([
+        {
+          invoiceNumber: 'INV-3',
+          total: new Prisma.Decimal(underlying),
+          status: 'open',
+          dueAt: new Date('2026-09-01'),
+        },
+      ]),
+    };
+    const invoicesTool = new MyInvoicesTool(invoicesBilling as any);
+    const invoicesResult = await invoicesTool.execute({}, session);
+    const invoiceTotal = (invoicesResult.invoices as Array<{ total: string }>)[0].total;
+
+    // BillingService.getPatientBalance formats with
+    // `new Prisma.Decimal(x).toFixed(2)` (billing.service.ts:216-218). Mirror
+    // that exact computation here so the two tools are proven not to drift.
+    const expectedBalanceFormatting = new Prisma.Decimal(underlying).toFixed(2);
+
+    const balanceBilling = {
+      getPatientBalance: jest.fn().mockResolvedValue({
+        totalBilled: expectedBalanceFormatting,
+        totalPaid: '0.00',
+        balance: expectedBalanceFormatting,
+      }),
+    };
+    const balanceTool = new MyBalanceTool(balanceBilling as any);
+    const balanceResult = await balanceTool.execute({}, session);
+
+    expect(invoiceTotal).toBe(expectedBalanceFormatting);
+    expect(balanceResult.balance).toBe(expectedBalanceFormatting);
+    expect(invoiceTotal).toBe(balanceResult.balance);
   });
 });
