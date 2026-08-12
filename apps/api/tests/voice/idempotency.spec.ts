@@ -134,3 +134,157 @@ describe('IdempotencyService.keyFor — collision resistance', () => {
     );
   });
 });
+
+/**
+ * Checking a cache and then awaiting the work is two steps with a gap between
+ * them. A retry issued before the first attempt resolves finds nothing cached
+ * and starts a second write — which is exactly the timeout-retry this class
+ * exists to absorb.
+ *
+ * Every test here starts BOTH calls before releasing either operation, so the
+ * overlap is real. A stray `await` between the two calls would turn these into
+ * sequential tests that prove nothing; the gate below makes that mistake hang
+ * rather than pass, and each test additionally asserts that nothing has settled
+ * at the moment the second caller arrives.
+ */
+describe('IdempotencyService.runOnce — concurrent callers', () => {
+  let service: IdempotencyService;
+
+  beforeEach(() => {
+    service = new IdempotencyService();
+  });
+
+  /**
+   * An operation that does not resolve until explicitly released, and that
+   * returns a DISTINCT result per invocation — so "both callers got the same
+   * result" is a real claim about de-duplication rather than an artifact of
+   * handing back one shared promise.
+   */
+  function gatedOperation(status: 'confirmed' | 'failed') {
+    const releases: Array<() => void> = [];
+    let invocations = 0;
+
+    const operation = jest.fn(() => {
+      const n = (invocations += 1);
+      return new Promise<VoiceToolResult>((resolve) => {
+        releases.push(() => resolve({ status, attempt: n }));
+      });
+    });
+
+    return { operation, releaseAll: () => releases.forEach((release) => release()) };
+  }
+
+  it('runs the operation once when two callers overlap on the same key', async () => {
+    const { operation, releaseAll } = gatedOperation('confirmed');
+
+    let settled = 0;
+    const first = service.runOnce('k', operation).then((r) => ((settled += 1), r));
+    const second = service.runOnce('k', operation).then((r) => ((settled += 1), r));
+
+    // Proves the two calls genuinely overlap: neither has produced a result at
+    // the point the second caller was admitted.
+    await Promise.resolve();
+    expect(settled).toBe(0);
+
+    releaseAll();
+    const [a, b] = await Promise.all([first, second]);
+
+    expect(operation).toHaveBeenCalledTimes(1);
+    expect(a).toEqual(b);
+    expect(a.attempt).toBe(1);
+  });
+
+  it('caches the confirmed result once, so a later caller still replays it', async () => {
+    const { operation, releaseAll } = gatedOperation('confirmed');
+
+    const first = service.runOnce('k', operation);
+    const second = service.runOnce('k', operation);
+    releaseAll();
+    await Promise.all([first, second]);
+
+    const later = await service.runOnce('k', operation);
+
+    expect(operation).toHaveBeenCalledTimes(1);
+    expect(later.attempt).toBe(1);
+  });
+
+  it('does not cache a failed result reached concurrently, so a retry still retries', async () => {
+    const { operation, releaseAll } = gatedOperation('failed');
+
+    let settled = 0;
+    const first = service.runOnce('k', operation).then((r) => ((settled += 1), r));
+    const second = service.runOnce('k', operation).then((r) => ((settled += 1), r));
+
+    await Promise.resolve();
+    expect(settled).toBe(0);
+
+    releaseAll();
+    const [a, b] = await Promise.all([first, second]);
+
+    expect(operation).toHaveBeenCalledTimes(1);
+    expect(a.status).toBe('failed');
+    expect(b.status).toBe('failed');
+
+    // The de-duplication must not leave the key occupied. A third, later call
+    // has to genuinely re-invoke the operation.
+    const retry = jest
+      .fn<Promise<VoiceToolResult>, []>()
+      .mockResolvedValue({ status: 'confirmed', appointmentId: 'a1' });
+    const third = await service.runOnce('k', retry);
+
+    expect(retry).toHaveBeenCalledTimes(1);
+    expect(third.status).toBe('confirmed');
+  });
+
+  it('frees the key when the operation throws, rather than wedging it forever', async () => {
+    const boom = jest.fn<Promise<VoiceToolResult>, []>().mockRejectedValue(new Error('boom'));
+
+    await expect(service.runOnce('k', boom)).rejects.toThrow('boom');
+
+    const after = jest
+      .fn<Promise<VoiceToolResult>, []>()
+      .mockResolvedValue({ status: 'confirmed', appointmentId: 'a1' });
+    const result = await service.runOnce('k', after);
+
+    expect(after).toHaveBeenCalledTimes(1);
+    expect(result.status).toBe('confirmed');
+  });
+
+  it('frees the key when two overlapping callers both hit a throw', async () => {
+    const releases: Array<() => void> = [];
+    const boom = jest.fn(
+      () =>
+        new Promise<VoiceToolResult>((_resolve, reject) => {
+          releases.push(() => reject(new Error('boom')));
+        })
+    );
+
+    const first = service.runOnce('k', boom);
+    const second = service.runOnce('k', boom);
+    // Both callers must observe the rejection; neither may be left dangling.
+    const settled = Promise.allSettled([first, second]);
+    releases.forEach((release) => release());
+
+    expect((await settled).map((outcome) => outcome.status)).toEqual(['rejected', 'rejected']);
+    expect(boom).toHaveBeenCalledTimes(1);
+
+    const after = jest
+      .fn<Promise<VoiceToolResult>, []>()
+      .mockResolvedValue({ status: 'confirmed', appointmentId: 'a1' });
+    await service.runOnce('k', after);
+
+    expect(after).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps different keys independent while both are in flight', async () => {
+    const { operation, releaseAll } = gatedOperation('confirmed');
+
+    const a = service.runOnce('k1', operation);
+    const b = service.runOnce('k2', operation);
+    releaseAll();
+    const [ra, rb] = await Promise.all([a, b]);
+
+    expect(operation).toHaveBeenCalledTimes(2);
+    expect(ra.attempt).not.toBe(rb.attempt);
+  });
+});

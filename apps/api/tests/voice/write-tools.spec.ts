@@ -467,6 +467,71 @@ describe('write tools — routed through ToolExecutorService', () => {
     expect(appointments.create).not.toHaveBeenCalled();
   });
 
+  it('two overlapping intake calls in the same turn create exactly one patient', async () => {
+    // The retry this guards against is a voice-pipeline timeout retry, which
+    // arrives before the first attempt has returned. PatientsService.create has
+    // no backstop here: its duplicate-email guard is a non-atomic
+    // find-then-create, and a caller who gives no email is not guarded at all.
+    // A second write would leave two patient records for one caller.
+    const releases: Array<() => void> = [];
+    patients.create.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          releases.push(() => resolve({ id: 'p-new' }));
+        })
+    );
+
+    const session = createAnonymousSession('s-race');
+
+    let settled = 0;
+    const first = executor
+      .execute('start_patient_intake', INTAKE_INPUT, session)
+      .then((r) => ((settled += 1), r));
+    const second = executor
+      .execute('start_patient_intake', INTAKE_INPUT, session)
+      .then((r) => ((settled += 1), r));
+
+    // Both calls are in flight before either can return — without this the
+    // test would quietly become two sequential calls and prove nothing.
+    await Promise.resolve();
+    expect(settled).toBe(0);
+
+    releases.forEach((release) => release());
+    const [a, b] = await Promise.all([first, second]);
+
+    expect(patients.create).toHaveBeenCalledTimes(1);
+    expect(a.status).toBe('confirmed');
+    expect(b.status).toBe('confirmed');
+    expect(a.patientId).toBe('p-new');
+    expect(b.patientId).toBe('p-new');
+    expect(session.patientId).toBe('p-new');
+  });
+
+  it('two overlapping bookings in the same turn create exactly one appointment', async () => {
+    const releases: Array<() => void> = [];
+    appointments.create.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          releases.push(() => resolve({ id: 'a-new', startTime: '2026-09-01T09:00:00.000Z' }));
+        })
+    );
+
+    const session = createVerifiedSession('s-race', 'u1', 'patient-1');
+
+    const first = executor.execute('book_appointment', BOOKING_INPUT, session);
+    const second = executor.execute('book_appointment', BOOKING_INPUT, session);
+
+    await Promise.resolve();
+    releases.forEach((release) => release());
+    const [a, b] = await Promise.all([first, second]);
+
+    // The exclusion constraint would absorb a second write, but only by
+    // turning it into a spurious 'failed' the agent would then read aloud.
+    expect(appointments.create).toHaveBeenCalledTimes(1);
+    expect(a.status).toBe('confirmed');
+    expect(b.status).toBe('confirmed');
+  });
+
   it('a verified session can go straight to booking without intake', async () => {
     const session = createVerifiedSession('s-verified', 'u1', 'patient-1');
 

@@ -15,6 +15,15 @@ export class IdempotencyService {
   private readonly completed = new Map<string, VoiceToolResult>();
 
   /**
+   * Work that has started but not finished. Checking `completed` and then
+   * awaiting the operation is two steps, and a retry arriving in the gap
+   * between them would find nothing cached and start a second write — which is
+   * the timeout retry this class exists to absorb. Overlapping callers join the
+   * promise already running instead.
+   */
+  private readonly inFlight = new Map<string, Promise<VoiceToolResult>>();
+
+  /**
    * The sessionId is client-supplied from POST /voice/text onwards, so plain
    * `${sessionId}:${turnIndex}:${toolName}` concatenation is not safe: a
    * sessionId containing ':' can flatten to the same string as a different
@@ -41,14 +50,34 @@ export class IdempotencyService {
       return previous;
     }
 
-    const result = await operation();
-
-    // Only successful writes are replayed. Caching a failure would prevent a
-    // legitimate retry from ever succeeding.
-    if (result.status === 'confirmed') {
-      this.completed.set(key, result);
+    const active = this.inFlight.get(key);
+    if (active) {
+      return active;
     }
 
-    return result;
+    const pending = (async () => {
+      const result = await operation();
+
+      // Only successful writes are replayed. Caching a failure would prevent a
+      // legitimate retry from ever succeeding. This runs before the promise
+      // settles, so no caller can observe the key as neither in flight nor
+      // completed.
+      if (result.status === 'confirmed') {
+        this.completed.set(key, result);
+      }
+
+      return result;
+    })();
+
+    this.inFlight.set(key, pending);
+
+    try {
+      return await pending;
+    } finally {
+      // Always released — on success, on a 'failed' result, and on a throw.
+      // Leaving the entry behind would wedge the key: every later retry would
+      // join a promise that has already rejected and never run again.
+      this.inFlight.delete(key);
+    }
   }
 }
