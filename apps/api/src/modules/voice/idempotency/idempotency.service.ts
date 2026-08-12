@@ -14,8 +14,22 @@ import { VoiceSession } from '../session/voice-session';
 export class IdempotencyService {
   private readonly completed = new Map<string, VoiceToolResult>();
 
+  /**
+   * The sessionId is client-supplied from POST /voice/text onwards, so plain
+   * `${sessionId}:${turnIndex}:${toolName}` concatenation is not safe: a
+   * sessionId containing ':' can flatten to the same string as a different
+   * session/turn/tool triple, and a hit on a colliding key replays one
+   * operation's result in answer to another.
+   *
+   * Each component is percent-encoded before joining, which escapes ':' (and
+   * '%' itself), so the separator cannot occur inside a component and the
+   * mapping from triple to key is injective. Plain identifiers are unaffected,
+   * so keys stay readable in logs.
+   */
   keyFor(session: VoiceSession, toolName: string): string {
-    return `${session.sessionId}:${session.turnIndex}:${toolName}`;
+    return [String(session.sessionId), String(session.turnIndex), String(toolName)]
+      .map((part) => encodeURIComponent(part))
+      .join(':');
   }
 
   async runOnce(

@@ -49,3 +49,88 @@ describe('IdempotencyService', () => {
     );
   });
 });
+
+/**
+ * The sessionId becomes client-supplied once POST /voice/text exists. Plain
+ * `${sessionId}:${turnIndex}:${toolName}` concatenation is then ambiguous: a
+ * sessionId containing ':' can produce the same key as a different
+ * session/turn/tool triple, and a cache hit on a colliding key replays one
+ * operation's result for a completely different operation.
+ */
+describe('IdempotencyService.keyFor — collision resistance', () => {
+  let service: IdempotencyService;
+
+  beforeEach(() => {
+    service = new IdempotencyService();
+  });
+
+  /** The construction being replaced, kept here to show what it does wrong. */
+  function naiveKey(sessionId: string, turnIndex: unknown, toolName: string): string {
+    return `${sessionId}:${turnIndex}:${toolName}`;
+  }
+
+  it('keeps the three components separable, so a colon in the sessionId cannot split wrong', () => {
+    const session = createVerifiedSession('s:1:book_appointment', 'u1', 'p1');
+    session.turnIndex = 2;
+
+    const key = service.keyFor(session, 'cancel_appointment');
+    const parts = key.split(':');
+
+    // Naive concatenation yields five segments here, and no reader of the key
+    // can tell which of them belonged to the sessionId.
+    expect(naiveKey('s:1:book_appointment', 2, 'cancel_appointment').split(':')).toHaveLength(5);
+
+    expect(parts).toHaveLength(3);
+    expect(parts.map(decodeURIComponent)).toEqual([
+      's:1:book_appointment',
+      '2',
+      'cancel_appointment',
+    ]);
+  });
+
+  it('does not collide with a different session, turn and tool combination', () => {
+    // Two genuinely different triples that the naive construction flattens to
+    // the same string.
+    const a = createVerifiedSession('sess:9', 'u1', 'p1');
+    a.turnIndex = 2;
+
+    const b = createVerifiedSession('sess', 'u2', 'p2');
+    // Untrusted request bodies do not always carry the declared type; this is
+    // exactly the value the naive key cannot distinguish from a's.
+    (b as unknown as { turnIndex: unknown }).turnIndex = '9:2';
+
+    expect(naiveKey('sess:9', 2, 'book_appointment')).toBe(naiveKey('sess', '9:2', 'book_appointment'));
+
+    expect(service.keyFor(a, 'book_appointment')).not.toBe(service.keyFor(b, 'book_appointment'));
+  });
+
+  it('does not replay one session’s confirmed result for another session', async () => {
+    const a = createVerifiedSession('sess:9', 'u1', 'p1');
+    a.turnIndex = 2;
+
+    const b = createVerifiedSession('sess', 'u2', 'p2');
+    (b as unknown as { turnIndex: unknown }).turnIndex = '9:2';
+
+    const bookedForA: VoiceToolResult = { status: 'confirmed', appointmentId: 'appt-for-a' };
+    const bookedForB: VoiceToolResult = { status: 'confirmed', appointmentId: 'appt-for-b' };
+
+    await service.runOnce(service.keyFor(a, 'book_appointment'), async () => bookedForA);
+    const forB = await service.runOnce(
+      service.keyFor(b, 'book_appointment'),
+      async () => bookedForB
+    );
+
+    expect(forB.appointmentId).toBe('appt-for-b');
+  });
+
+  it('percent signs in a sessionId stay unambiguous too', () => {
+    const literal = createVerifiedSession('a%3Ab', 'u1', 'p1');
+    const colon = createVerifiedSession('a:b', 'u1', 'p1');
+
+    // Escaping that did not also escape '%' would map these two distinct
+    // sessions onto the same key.
+    expect(service.keyFor(literal, 'book_appointment')).not.toBe(
+      service.keyFor(colon, 'book_appointment')
+    );
+  });
+});
