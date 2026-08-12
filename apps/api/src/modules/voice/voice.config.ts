@@ -12,6 +12,17 @@ export const VOICE_CONFIG = {
   maxTokens: 2048,
 };
 
+/**
+ * The feature flag as a dependency rather than a module-level read, so a test
+ * can exercise both the enabled and the disabled endpoint without reaching into
+ * `process.env` before an import. Production binds it to VOICE_CONFIG.
+ */
+export interface VoiceFeatureFlag {
+  enabled: boolean;
+}
+
+export const VOICE_FEATURE_FLAG = Symbol('VOICE_FEATURE_FLAG');
+
 export const CLINIC_INFO = {
   name: 'SmileFlow Dental',
   address: '124 Chestnut Street, Springfield',

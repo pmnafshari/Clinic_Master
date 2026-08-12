@@ -1,4 +1,8 @@
-import { IdempotencyService } from '../../src/modules/voice/idempotency/idempotency.service';
+import {
+  IdempotencyService,
+  IDEMPOTENCY_MAX_ENTRIES,
+  IDEMPOTENCY_TTL_MS,
+} from '../../src/modules/voice/idempotency/idempotency.service';
 import { createVerifiedSession } from '../../src/modules/voice/session/voice-session';
 import { VoiceToolResult } from '../../src/modules/voice/tools/tool-definition.interface';
 
@@ -286,5 +290,136 @@ describe('IdempotencyService.runOnce — concurrent callers', () => {
 
     expect(operation).toHaveBeenCalledTimes(2);
     expect(ra.attempt).not.toBe(rb.attempt);
+  });
+});
+
+/**
+ * `completed` is keyed partly by a client-supplied sessionId. Left unevicted it
+ * is a remote memory-exhaustion vector: a caller who varies the sessionId grows
+ * the map without bound. Eviction is lazy (checked on access and on write)
+ * rather than timer-driven, so nothing keeps the Node process or a Jest worker
+ * alive. `inFlight` is self-limiting — entries are always removed in a `finally`
+ * — and needs no bound.
+ *
+ * The clock is injected so these tests are deterministic and so that the
+ * "expired" case is genuinely reached rather than merely assumed.
+ */
+describe('IdempotencyService — bounded completed cache', () => {
+  /** A hand-cranked clock. Nothing here depends on wall time or fake timers. */
+  function clockAt(start = 1_000_000) {
+    let current = start;
+    return {
+      now: () => current,
+      advance: (ms: number) => {
+        current += ms;
+      },
+    };
+  }
+
+  function confirmed(id: string) {
+    return jest
+      .fn<Promise<VoiceToolResult>, []>()
+      .mockResolvedValue({ status: 'confirmed', appointmentId: id });
+  }
+
+  it('exposes a finite TTL and size cap', () => {
+    expect(IDEMPOTENCY_TTL_MS).toBeGreaterThan(0);
+    expect(Number.isFinite(IDEMPOTENCY_TTL_MS)).toBe(true);
+    expect(IDEMPOTENCY_MAX_ENTRIES).toBeGreaterThan(0);
+    expect(Number.isFinite(IDEMPOTENCY_MAX_ENTRIES)).toBe(true);
+  });
+
+  /**
+   * The control for the expiry test below. If the entry were never written in
+   * the first place, this goes red — so "expired" cannot pass vacuously.
+   */
+  it('replays a confirmed result while it is still inside the TTL', async () => {
+    const clock = clockAt();
+    const service = new IdempotencyService(clock.now);
+
+    const first = confirmed('a1');
+    await service.runOnce('k', first);
+
+    clock.advance(IDEMPOTENCY_TTL_MS - 1);
+
+    const second = confirmed('a2');
+    const replay = await service.runOnce('k', second);
+
+    expect(second).not.toHaveBeenCalled();
+    expect(replay.appointmentId).toBe('a1');
+    expect(service.completedSize()).toBe(1);
+  });
+
+  it('stops replaying — and drops the entry — once the TTL has passed', async () => {
+    const clock = clockAt();
+    const service = new IdempotencyService(clock.now);
+
+    await service.runOnce('k', confirmed('a1'));
+    expect(service.completedSize()).toBe(1);
+
+    clock.advance(IDEMPOTENCY_TTL_MS);
+
+    const second = confirmed('a2');
+    const result = await service.runOnce('k', second);
+
+    expect(second).toHaveBeenCalledTimes(1);
+    expect(result.appointmentId).toBe('a2');
+  });
+
+  it('reclaims expired entries rather than accumulating them', async () => {
+    const clock = clockAt();
+    const service = new IdempotencyService(clock.now);
+
+    for (let i = 0; i < 50; i += 1) {
+      await service.runOnce(`k${i}`, confirmed(`a${i}`));
+    }
+    expect(service.completedSize()).toBe(50);
+
+    clock.advance(IDEMPOTENCY_TTL_MS);
+    await service.runOnce('later', confirmed('later'));
+
+    // The 50 expired entries are gone; only the fresh one remains.
+    expect(service.completedSize()).toBe(1);
+  });
+
+  it('never exceeds the size cap, even with a fresh key every call', async () => {
+    const clock = clockAt();
+    const service = new IdempotencyService(clock.now);
+
+    for (let i = 0; i < IDEMPOTENCY_MAX_ENTRIES + 250; i += 1) {
+      await service.runOnce(`attacker-${i}`, confirmed(`a${i}`));
+    }
+
+    expect(service.completedSize()).toBeLessThanOrEqual(IDEMPOTENCY_MAX_ENTRIES);
+  });
+
+  it('evicts the oldest entry first when the cap is reached', async () => {
+    const clock = clockAt();
+    const service = new IdempotencyService(clock.now);
+
+    await service.runOnce('oldest', confirmed('oldest'));
+    for (let i = 0; i < IDEMPOTENCY_MAX_ENTRIES; i += 1) {
+      await service.runOnce(`filler-${i}`, confirmed(`f${i}`));
+    }
+
+    const reRun = confirmed('re-run');
+    await service.runOnce('oldest', reRun);
+    expect(reRun).toHaveBeenCalledTimes(1);
+
+    // The most recent write is still cached — eviction is oldest-first, not
+    // a wholesale flush.
+    const newest = confirmed('newest');
+    await service.runOnce(`filler-${IDEMPOTENCY_MAX_ENTRIES - 1}`, newest);
+    expect(newest).not.toHaveBeenCalled();
+  });
+
+  it('defaults to the real clock when none is injected', async () => {
+    const service = new IdempotencyService();
+
+    const operation = confirmed('a1');
+    await service.runOnce('k', operation);
+    await service.runOnce('k', operation);
+
+    expect(operation).toHaveBeenCalledTimes(1);
   });
 });

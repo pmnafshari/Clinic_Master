@@ -16,10 +16,16 @@ import { BookAppointmentTool } from './tools/book-appointment.tool';
 import { RescheduleAppointmentTool } from './tools/reschedule-appointment.tool';
 import { CancelAppointmentTool } from './tools/cancel-appointment.tool';
 import { IdempotencyService } from './idempotency/idempotency.service';
+import { ClaudeAgentService } from './agent/claude.agent';
+import { VoiceController } from './voice.controller';
+import { VOICE_CONFIG, VOICE_FEATURE_FLAG } from './voice.config';
 
 @Module({
   imports: [AppointmentsModule, UsersModule, BillingModule, PatientsModule],
+  controllers: [VoiceController],
   providers: [
+    ClaudeAgentService,
+    { provide: VOICE_FEATURE_FLAG, useValue: VOICE_CONFIG },
     ToolRegistryService,
     ToolExecutorService,
     ClinicInfoTool,
