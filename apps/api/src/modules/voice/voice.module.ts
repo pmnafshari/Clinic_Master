@@ -10,6 +10,7 @@ import { CheckAvailabilityTool } from './tools/check-availability.tool';
 import { MyAppointmentsTool } from './tools/my-appointments.tool';
 import { MyInvoicesTool } from './tools/my-invoices.tool';
 import { MyBalanceTool } from './tools/my-balance.tool';
+import { IdempotencyService } from './idempotency/idempotency.service';
 
 @Module({
   imports: [AppointmentsModule, UsersModule, BillingModule],
@@ -22,6 +23,7 @@ import { MyBalanceTool } from './tools/my-balance.tool';
     MyAppointmentsTool,
     MyInvoicesTool,
     MyBalanceTool,
+    IdempotencyService,
   ],
   exports: [ToolRegistryService, ToolExecutorService],
 })
