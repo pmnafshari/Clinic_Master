@@ -2,6 +2,7 @@ import { Prisma } from '@prisma/client';
 import { MyAppointmentsTool } from '../../src/modules/voice/tools/my-appointments.tool';
 import { MyInvoicesTool } from '../../src/modules/voice/tools/my-invoices.tool';
 import { MyBalanceTool } from '../../src/modules/voice/tools/my-balance.tool';
+import { BillingService } from '../../src/modules/billing/billing.service';
 import { createVerifiedSession } from '../../src/modules/voice/session/voice-session';
 import { ToolRegistryService } from '../../src/modules/voice/tools/tool-registry.service';
 import { ToolExecutorService } from '../../src/modules/voice/tools/tool-executor.service';
@@ -244,41 +245,44 @@ describe('verified read tools — monetary formatting', () => {
     expect(invoices[0].total).toBe('245.05');
   });
 
-  it('formats invoice totals identically to how get_my_balance formats the same underlying value', async () => {
+  it('formats invoice totals identically to what get_my_balance actually returns through the real BillingService, for the same underlying value', async () => {
     const session = createVerifiedSession('s1', 'user-1', 'patient-1');
     const underlying = '245.045';
 
-    const invoicesBilling = {
-      findAllInvoices: jest.fn().mockResolvedValue([
-        {
-          invoiceNumber: 'INV-3',
-          total: new Prisma.Decimal(underlying),
-          status: 'open',
-          dueAt: new Date('2026-09-01'),
-        },
-      ]),
+    // A single stubbed Prisma layer backs one REAL BillingService instance,
+    // shared by both tools below. Neither tool's formatting formula is
+    // re-derived here: MyInvoicesTool runs its own
+    // `new Prisma.Decimal(...).toFixed(2)` (my-invoices.tool.ts) and
+    // MyBalanceTool runs BillingService's actual, unmocked
+    // `totalBilled.sub(totalPaid).toFixed(2)` (billing.service.ts:216-218).
+    // This compares two independent, genuine implementations rather than one
+    // formula checked against itself — if billing.service.ts's rounding ever
+    // changes, this test observes the real change instead of a copy of the
+    // old formula that could never disagree with it.
+    const fakePrisma = {
+      invoice: {
+        findMany: jest.fn().mockResolvedValue([
+          {
+            invoiceNumber: 'INV-3',
+            total: new Prisma.Decimal(underlying),
+            status: 'open',
+            dueAt: new Date('2026-09-01'),
+            payments: [],
+          },
+        ]),
+      },
     };
-    const invoicesTool = new MyInvoicesTool(invoicesBilling as any);
+    const billingService = new BillingService(fakePrisma as any);
+
+    const invoicesTool = new MyInvoicesTool(billingService);
     const invoicesResult = await invoicesTool.execute({}, session);
     const invoiceTotal = (invoicesResult.invoices as Array<{ total: string }>)[0].total;
 
-    // BillingService.getPatientBalance formats with
-    // `new Prisma.Decimal(x).toFixed(2)` (billing.service.ts:216-218). Mirror
-    // that exact computation here so the two tools are proven not to drift.
-    const expectedBalanceFormatting = new Prisma.Decimal(underlying).toFixed(2);
-
-    const balanceBilling = {
-      getPatientBalance: jest.fn().mockResolvedValue({
-        totalBilled: expectedBalanceFormatting,
-        totalPaid: '0.00',
-        balance: expectedBalanceFormatting,
-      }),
-    };
-    const balanceTool = new MyBalanceTool(balanceBilling as any);
+    const balanceTool = new MyBalanceTool(billingService);
     const balanceResult = await balanceTool.execute({}, session);
 
-    expect(invoiceTotal).toBe(expectedBalanceFormatting);
-    expect(balanceResult.balance).toBe(expectedBalanceFormatting);
+    expect(invoiceTotal).toBe('245.05');
+    expect(balanceResult.balance).toBe('245.05');
     expect(invoiceTotal).toBe(balanceResult.balance);
   });
 });
