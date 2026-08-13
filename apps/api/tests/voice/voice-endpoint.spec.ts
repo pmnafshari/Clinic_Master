@@ -88,32 +88,40 @@ describe('POST /api/voice/text', () => {
   });
 
   it('assigns turnIndex server-side and increments it per turn', async () => {
-    const send = () =>
+    // The sessionId is whatever the server issued, echoed back — a client
+    // cannot pick one, so continuity runs through the server's own id.
+    const send = (sessionId?: string) =>
       request(app.getHttpServer())
         .post('/api/voice/text')
-        .send({ sessionId: 'sess-abc123', message: 'hello' })
+        .send(sessionId ? { sessionId, message: 'hello' } : { message: 'hello' })
         .expect(200);
 
-    expect((await send()).body.turnIndex).toBe(1);
-    expect((await send()).body.turnIndex).toBe(2);
-    expect((await send()).body.turnIndex).toBe(3);
+    const first = await send();
+    expect(first.body.turnIndex).toBe(1);
+
+    const second = await send(first.body.sessionId);
+    expect(second.body.turnIndex).toBe(2);
+
+    const third = await send(second.body.sessionId);
+    expect(third.body.turnIndex).toBe(3);
   });
 
   it('keeps turn indexes independent per session', async () => {
-    await request(app.getHttpServer())
+    const first = await request(app.getHttpServer())
       .post('/api/voice/text')
-      .send({ sessionId: 'sess-one', message: 'hello' })
+      .send({ message: 'hello' })
       .expect(200);
     await request(app.getHttpServer())
       .post('/api/voice/text')
-      .send({ sessionId: 'sess-one', message: 'hello again' })
+      .send({ sessionId: first.body.sessionId, message: 'hello again' })
       .expect(200);
 
     const other = await request(app.getHttpServer())
       .post('/api/voice/text')
-      .send({ sessionId: 'sess-two', message: 'hello' })
+      .send({ message: 'hello' })
       .expect(200);
 
+    expect(other.body.sessionId).not.toBe(first.body.sessionId);
     expect(other.body.turnIndex).toBe(1);
   });
 
@@ -244,15 +252,22 @@ describe('POST /api/voice/text — identity injection', () => {
   );
 
   it('does not let an injected turnIndex reset or skip the server counter', async () => {
-    const send = (turnIndex: number) =>
+    const send = (turnIndex: number, sessionId?: string) =>
       request(permissive.getHttpServer())
         .post('/api/voice/text')
-        .send({ sessionId: 'sess-abc123', message: 'hello', turnIndex })
+        .send({ ...(sessionId ? { sessionId } : {}), message: 'hello', turnIndex })
         .expect(200);
 
-    expect((await send(500)).body.turnIndex).toBe(1);
-    expect((await send(0)).body.turnIndex).toBe(2);
-    expect((await send(-1)).body.turnIndex).toBe(3);
+    // Same live session throughout, so the counter is genuinely being driven
+    // forward rather than restarting; the injected value is ignored each time.
+    const first = await send(500);
+    expect(first.body.turnIndex).toBe(1);
+
+    const second = await send(0, first.body.sessionId);
+    expect(second.body.turnIndex).toBe(2);
+
+    const third = await send(-1, second.body.sessionId);
+    expect(third.body.turnIndex).toBe(3);
   });
 
   it('never returns a verified session for an anonymous caller', async () => {

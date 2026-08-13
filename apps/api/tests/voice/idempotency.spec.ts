@@ -13,10 +13,23 @@ describe('IdempotencyService', () => {
     service = new IdempotencyService();
   });
 
-  it('builds a key from session, turn and tool name', () => {
+  it('builds a key from the session nonce, turn and tool name', () => {
     const session = createVerifiedSession('s1', 'u1', 'p1');
     session.turnIndex = 3;
-    expect(service.keyFor(session, 'book_appointment')).toBe('s1:3:book_appointment');
+    expect(service.keyFor(session, 'book_appointment')).toBe(
+      `${session.idempotencyNonce}:3:book_appointment`
+    );
+  });
+
+  /**
+   * The sessionId is deliberately absent from the key. It repeats across the
+   * lifetime of a caller, and a session recreated after eviction would
+   * regenerate an identical key and replay a `confirmed` result for a write
+   * that never ran.
+   */
+  it('does not derive the key from the sessionId', () => {
+    const session = createVerifiedSession('s1', 'u1', 'p1');
+    expect(service.keyFor(session, 'book_appointment')).not.toContain('s1');
   });
 
   it('runs the operation once and replays the result', async () => {
@@ -55,13 +68,19 @@ describe('IdempotencyService', () => {
 });
 
 /**
- * The sessionId becomes client-supplied once POST /voice/text exists. Plain
- * `${sessionId}:${turnIndex}:${toolName}` concatenation is then ambiguous: a
- * sessionId containing ':' can produce the same key as a different
- * session/turn/tool triple, and a cache hit on a colliding key replays one
- * operation's result for a completely different operation.
+ * What must never happen: two operations that are not the same operation
+ * sharing a key, so that a cache hit replays one result in answer to another.
+ *
+ * The sessionId cannot be what namespaces the cache. It repeats — a caller
+ * evicted from the bounded session store and returning gets a new session whose
+ * turnIndex restarts at 0, so a sessionId-derived key regenerates byte for byte
+ * and collides with the evicted session's entries. The nonce is fresh per
+ * session, which is what makes that collision impossible.
+ *
+ * Percent-encoding each component remains as a backstop against a separator
+ * appearing inside one.
  */
-describe('IdempotencyService.keyFor — collision resistance', () => {
+describe('IdempotencyService.keyFor — namespace isolation', () => {
   let service: IdempotencyService;
 
   beforeEach(() => {
@@ -69,51 +88,76 @@ describe('IdempotencyService.keyFor — collision resistance', () => {
   });
 
   /** The construction being replaced, kept here to show what it does wrong. */
-  function naiveKey(sessionId: string, turnIndex: unknown, toolName: string): string {
-    return `${sessionId}:${turnIndex}:${toolName}`;
+  function naiveKey(namespace: string, turnIndex: unknown, toolName: string): string {
+    return `${namespace}:${turnIndex}:${toolName}`;
   }
 
-  it('keeps the three components separable, so a colon in the sessionId cannot split wrong', () => {
-    const session = createVerifiedSession('s:1:book_appointment', 'u1', 'p1');
+  /**
+   * The strongest form of the property: two sessions sharing a byte-identical,
+   * hostile sessionId at the same turn still get different keys, because the
+   * sessionId is not what namespaces them.
+   */
+  it('gives two sessions with the same sessionId different keys', () => {
+    const a = createVerifiedSession('s:1:book_appointment', 'u1', 'p1');
+    const b = createVerifiedSession('s:1:book_appointment', 'u2', 'p2');
+    a.turnIndex = 2;
+    b.turnIndex = 2;
+
+    expect(a.sessionId).toBe(b.sessionId);
+    expect(service.keyFor(a, 'book_appointment')).not.toBe(service.keyFor(b, 'book_appointment'));
+  });
+
+  it('keeps the three components separable', () => {
+    const session = createVerifiedSession('s1', 'u1', 'p1');
     session.turnIndex = 2;
 
-    const key = service.keyFor(session, 'cancel_appointment');
-    const parts = key.split(':');
-
-    // Naive concatenation yields five segments here, and no reader of the key
-    // can tell which of them belonged to the sessionId.
-    expect(naiveKey('s:1:book_appointment', 2, 'cancel_appointment').split(':')).toHaveLength(5);
+    const parts = service.keyFor(session, 'cancel_appointment').split(':');
 
     expect(parts).toHaveLength(3);
     expect(parts.map(decodeURIComponent)).toEqual([
-      's:1:book_appointment',
+      session.idempotencyNonce,
       '2',
       'cancel_appointment',
     ]);
   });
 
-  it('does not collide with a different session, turn and tool combination', () => {
-    // Two genuinely different triples that the naive construction flattens to
-    // the same string.
-    const a = createVerifiedSession('sess:9', 'u1', 'p1');
+  /**
+   * The percent-encoding backstop, exercised directly. A server-generated nonce
+   * is base64url and contains nothing that needs escaping, so this pins the
+   * behaviour against a future change of nonce source rather than against
+   * anything reachable today.
+   */
+  it('escapes a separator inside a component, so components cannot bleed', () => {
+    const a = createVerifiedSession('s1', 'u1', 'p1');
+    const b = createVerifiedSession('s2', 'u2', 'p2');
+    a.idempotencyNonce = 'n:9';
     a.turnIndex = 2;
-
-    const b = createVerifiedSession('sess', 'u2', 'p2');
-    // Untrusted request bodies do not always carry the declared type; this is
-    // exactly the value the naive key cannot distinguish from a's.
+    b.idempotencyNonce = 'n';
     (b as unknown as { turnIndex: unknown }).turnIndex = '9:2';
 
-    expect(naiveKey('sess:9', 2, 'book_appointment')).toBe(naiveKey('sess', '9:2', 'book_appointment'));
+    // Naive concatenation flattens these two distinct triples onto one string.
+    expect(naiveKey('n:9', 2, 'book_appointment')).toBe(naiveKey('n', '9:2', 'book_appointment'));
 
     expect(service.keyFor(a, 'book_appointment')).not.toBe(service.keyFor(b, 'book_appointment'));
   });
 
-  it('does not replay one session’s confirmed result for another session', async () => {
-    const a = createVerifiedSession('sess:9', 'u1', 'p1');
-    a.turnIndex = 2;
+  it('escapes percent signs too, so the escape itself is unambiguous', () => {
+    const literal = createVerifiedSession('s1', 'u1', 'p1');
+    const colon = createVerifiedSession('s2', 'u2', 'p2');
+    literal.idempotencyNonce = 'a%3Ab';
+    colon.idempotencyNonce = 'a:b';
 
+    // Escaping that did not also escape '%' would map these onto the same key.
+    expect(service.keyFor(literal, 'book_appointment')).not.toBe(
+      service.keyFor(colon, 'book_appointment')
+    );
+  });
+
+  it('does not replay one session’s confirmed result for another session', async () => {
+    const a = createVerifiedSession('sess', 'u1', 'p1');
     const b = createVerifiedSession('sess', 'u2', 'p2');
-    (b as unknown as { turnIndex: unknown }).turnIndex = '9:2';
+    a.turnIndex = 2;
+    b.turnIndex = 2;
 
     const bookedForA: VoiceToolResult = { status: 'confirmed', appointmentId: 'appt-for-a' };
     const bookedForB: VoiceToolResult = { status: 'confirmed', appointmentId: 'appt-for-b' };
@@ -125,17 +169,6 @@ describe('IdempotencyService.keyFor — collision resistance', () => {
     );
 
     expect(forB.appointmentId).toBe('appt-for-b');
-  });
-
-  it('percent signs in a sessionId stay unambiguous too', () => {
-    const literal = createVerifiedSession('a%3Ab', 'u1', 'p1');
-    const colon = createVerifiedSession('a:b', 'u1', 'p1');
-
-    // Escaping that did not also escape '%' would map these two distinct
-    // sessions onto the same key.
-    expect(service.keyFor(literal, 'book_appointment')).not.toBe(
-      service.keyFor(colon, 'book_appointment')
-    );
   });
 });
 

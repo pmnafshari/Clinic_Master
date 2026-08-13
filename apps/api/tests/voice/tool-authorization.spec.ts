@@ -167,7 +167,12 @@ describe('tool authorization — model-controlled input cannot influence identit
     // its keys never merge into the session.
     expect(seen.input).not.toBe(seen.session);
     expect(seen.input).toEqual(injected);
-    expect(seen.session).toEqual(createVerifiedSession('s1', 'u1', 'p1'));
+    // Pristine apart from the nonce, which is random per session by design.
+    // toEqual still fails if any injected key merged in.
+    expect(seen.session).toEqual({
+      ...createVerifiedSession('s1', 'u1', 'p1'),
+      idempotencyNonce: session.idempotencyNonce,
+    });
   });
 
   it('still blocks a verified tool when input claims identityVerified / tier', async () => {

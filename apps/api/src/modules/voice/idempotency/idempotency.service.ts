@@ -56,23 +56,28 @@ export class IdempotencyService {
   }
 
   /**
-   * The sessionId is client-supplied from POST /voice/text onwards, so plain
-   * `${sessionId}:${turnIndex}:${toolName}` concatenation is not safe: a
-   * sessionId containing ':' can flatten to the same string as a different
-   * session/turn/tool triple, and a hit on a colliding key replays one
-   * operation's result in answer to another.
+   * Keyed on the session's nonce rather than its id.
    *
-   * Each component is percent-encoded before joining, which escapes ':' (and
-   * '%' itself), so the separator cannot occur inside a component and the
-   * mapping from triple to key is injective. Plain identifiers are unaffected,
-   * so keys stay readable in logs.
+   * `sessionId` cannot namespace this cache. Session storage is bounded, so a
+   * live conversation can be evicted by size pressure; when that caller returns,
+   * a new session is created and `turnIndex` restarts at 0. A key built from
+   * `sessionId` + `turnIndex` would regenerate byte-for-byte, hit the entry the
+   * evicted session left behind, and replay a `confirmed` result for a write
+   * that never executed — the agent reporting a booking that does not exist.
+   * The nonce is fresh per session, so a recreated session simply cannot
+   * address the old namespace.
    *
-   * This is the backstop, not the primary control: VoiceTextDto already refuses
-   * any sessionId outside `[A-Za-z0-9_-]{1,64}`, so neither ':' nor '%' can
-   * reach here in the first place.
+   * `turnIndex` stays in the key: de-duplicating a pipeline's retry *within* one
+   * turn is the entire point of this class, and dropping it would collapse two
+   * legitimate bookings in one conversation into one.
+   *
+   * Each component is still percent-encoded before joining, so ':' (and '%'
+   * itself) cannot occur inside a component and the mapping from triple to key
+   * stays injective. That is now a backstop twice over: the nonce is generated
+   * server-side from a CSPRNG and contains no character that needs escaping.
    */
   keyFor(session: VoiceSession, toolName: string): string {
-    return [String(session.sessionId), String(session.turnIndex), String(toolName)]
+    return [String(session.idempotencyNonce), String(session.turnIndex), String(toolName)]
       .map((part) => encodeURIComponent(part))
       .join(':');
   }
