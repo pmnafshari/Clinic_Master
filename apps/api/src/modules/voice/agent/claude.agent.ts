@@ -120,7 +120,9 @@ export class ClaudeAgentService {
       // A refusal arrives on a successful HTTP 200 and can carry partial
       // content, so this is checked before `content` is read at all.
       if (response.stop_reason === 'refusal') {
-        this.logger.warn(`Model refused a turn for session ${session.sessionId}`);
+        // logId, never sessionId: the sessionId is a bearer credential and
+        // logs are readable by people who should not be able to resume calls.
+        this.logger.warn(`Model refused a turn for session ${session.logId}`);
         return {
           reply:
             'I am sorry, I cannot help with that. Let me put you through to the clinic.',
@@ -166,7 +168,7 @@ export class ClaudeAgentService {
       messages.push({ role: 'user', content: results });
     }
 
-    this.logger.warn(`Turn hit the iteration cap for session ${session.sessionId}`);
+    this.logger.warn(`Turn hit the iteration cap for session ${session.logId}`);
     return {
       reply: 'I am having trouble with that. Let me put you through to the front desk.',
       toolCalls,

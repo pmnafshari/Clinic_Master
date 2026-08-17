@@ -145,11 +145,22 @@ describe('tool authorization — model-controlled input cannot influence identit
     registry.register(tool);
 
     const session = createVerifiedSession('s1', 'u1', 'p1');
+
+    // Captured BEFORE the call. Comparing against `session.idempotencyNonce`
+    // afterwards would pin the value to itself: the tool receives the session
+    // object itself, so a merge would overwrite both sides of the comparison
+    // and pass.
+    const nonceBefore = session.idempotencyNonce;
+    const logIdBefore = session.logId;
+
     const injected = {
       patientId: 'p-victim',
       patient_id: 'p-victim',
       userId: 'u-victim',
       identityVerified: true,
+      idempotencyNonce: 'nonce-from-model',
+      logId: 'logid-from-model',
+      sessionId: 'sess-from-model',
     };
 
     const result = await executor.execute('read_patient_thing', injected, session);
@@ -167,11 +178,20 @@ describe('tool authorization — model-controlled input cannot influence identit
     // its keys never merge into the session.
     expect(seen.input).not.toBe(seen.session);
     expect(seen.input).toEqual(injected);
-    // Pristine apart from the nonce, which is random per session by design.
-    // toEqual still fails if any injected key merged in.
+
+    // The server-side identifiers are the ones the session was created with,
+    // not the ones the model asked for.
+    expect(seen.session?.idempotencyNonce).toBe(nonceBefore);
+    expect(seen.session?.logId).toBe(logIdBefore);
+    expect(seen.session?.sessionId).toBe('s1');
+
+    // Pristine apart from the per-session random values, which are compared
+    // against what they were before the call. toEqual still fails if any
+    // injected key merged in.
     expect(seen.session).toEqual({
       ...createVerifiedSession('s1', 'u1', 'p1'),
-      idempotencyNonce: session.idempotencyNonce,
+      idempotencyNonce: nonceBefore,
+      logId: logIdBefore,
     });
   });
 
