@@ -447,22 +447,32 @@ describe('write tools — routed through ToolExecutorService', () => {
   });
 
   it('the intake-to-book flow depends on the capability flag, not on luck', async () => {
-    // Negative control for the test above. Same tools, same executor, but this
-    // intake instance has the capability flag stripped — so the executor hands
-    // it a narrowed copy and its write to session.patientId is discarded. If
-    // the flow above passed for some other reason (a shared object smuggled in
-    // by accident), this control would still succeed and reveal it.
+    // Negative control for the test above. Same tools, same executor class, but
+    // this intake instance has the capability flag stripped — so the executor
+    // hands it a narrowed copy and its write to session.patientId is discarded.
+    // If the flow above passed for some other reason (a shared object smuggled
+    // in by accident), this control would still succeed and reveal it.
+    //
+    // A separate registry, because names are unique: registering the flagless
+    // instance over the flagged one is exactly the silent shadowing that
+    // ToolRegistryService.register now refuses.
     const flagless = new PatientIntakeTool(patients as any, idempotency) as VoiceTool;
     delete flagless.needsPatientContext;
-    registry.register(flagless);
+
+    const controlRegistry = new ToolRegistryService();
+    const controlExecutor = new ToolExecutorService(controlRegistry);
+    controlRegistry.register(flagless);
+    controlRegistry.register(
+      new BookAppointmentTool(appointments as any, users as any, idempotency)
+    );
 
     const session = createAnonymousSession('s-control');
 
-    const intake = await executor.execute('start_patient_intake', INTAKE_INPUT, session);
+    const intake = await controlExecutor.execute('start_patient_intake', INTAKE_INPUT, session);
     expect(intake.status).toBe('confirmed');
     expect(session.patientId).toBeNull();
 
-    const booking = await executor.execute('book_appointment', BOOKING_INPUT, session);
+    const booking = await controlExecutor.execute('book_appointment', BOOKING_INPUT, session);
     expect(booking).toEqual({ status: 'failed', error: 'no_patient_in_session' });
     expect(appointments.create).not.toHaveBeenCalled();
   });
