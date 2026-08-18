@@ -7,6 +7,7 @@ import {
 } from '../../src/modules/voice/agent/claude.agent';
 import { ToolRegistryService } from '../../src/modules/voice/tools/tool-registry.service';
 import { ToolExecutorService } from '../../src/modules/voice/tools/tool-executor.service';
+import { AuditService } from '../../src/modules/audit/audit.service';
 import {
   createAnonymousSession,
   createVerifiedSession,
@@ -116,6 +117,16 @@ function expectSafeLogging(
   expect(joined).toContain(session.logId);
 }
 
+
+/**
+ * The executor audits every tool call it handles. What that record contains —
+ * and that it never carries the bearer sessionId — is covered in
+ * tool-audit.spec.ts; here the audit service only has to exist.
+ */
+function stubAudit(): AuditService {
+  return { log: jest.fn().mockResolvedValue(undefined) } as unknown as AuditService;
+}
+
 describe('session identifiers never reach the logs', () => {
   let registry: ToolRegistryService;
   let executor: ToolExecutorService;
@@ -123,7 +134,7 @@ describe('session identifiers never reach the logs', () => {
 
   beforeEach(() => {
     registry = new ToolRegistryService();
-    executor = new ToolExecutorService(registry);
+    executor = new ToolExecutorService(registry, stubAudit());
     capture = captureLogs();
   });
 
@@ -263,7 +274,7 @@ describe('logId is a distinct, non-secret correlation id', () => {
 
   it('survives the narrowing the executor applies to a tool session', async () => {
     const registry = new ToolRegistryService();
-    const executor = new ToolExecutorService(registry);
+    const executor = new ToolExecutorService(registry, stubAudit());
     let seen: VoiceSession | undefined;
 
     registry.register({

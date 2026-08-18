@@ -4,8 +4,19 @@ import { CheckAvailabilityTool } from '../../src/modules/voice/tools/check-avail
 import { createAnonymousSession, createVerifiedSession } from '../../src/modules/voice/session/voice-session';
 import { ToolRegistryService } from '../../src/modules/voice/tools/tool-registry.service';
 import { ToolExecutorService } from '../../src/modules/voice/tools/tool-executor.service';
+import { AuditService } from '../../src/modules/audit/audit.service';
 import { VoiceTool } from '../../src/modules/voice/tools/tool-definition.interface';
 import { VoiceSession } from '../../src/modules/voice/session/voice-session';
+
+
+/**
+ * The executor audits every tool call it handles. What that record contains —
+ * and that it never carries the bearer sessionId — is covered in
+ * tool-audit.spec.ts; here the audit service only has to exist.
+ */
+function stubAudit(): AuditService {
+  return { log: jest.fn().mockResolvedValue(undefined) } as unknown as AuditService;
+}
 
 describe('public tools', () => {
   const session = createAnonymousSession('s1');
@@ -87,7 +98,7 @@ describe('public tools — executor projection protects patient identity', () =>
 
   beforeEach(() => {
     registry = new ToolRegistryService();
-    executor = new ToolExecutorService(registry);
+    executor = new ToolExecutorService(registry, stubAudit());
 
     // Wrap each tool so it records exactly the session object it was handed,
     // without changing its real execute() logic.

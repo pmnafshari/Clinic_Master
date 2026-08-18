@@ -14,6 +14,7 @@ import {
 } from '../../src/modules/voice/agent/claude.agent';
 import { ToolRegistryService } from '../../src/modules/voice/tools/tool-registry.service';
 import { ToolExecutorService } from '../../src/modules/voice/tools/tool-executor.service';
+import { AuditService } from '../../src/modules/audit/audit.service';
 import { VOICE_FEATURE_FLAG } from '../../src/modules/voice/voice.config';
 
 /**
@@ -48,6 +49,9 @@ async function buildApp(options: {
       ToolRegistryService,
       ToolExecutorService,
       ClaudeAgentService,
+      // The executor audits every call; what it writes is tool-audit.spec.ts's
+      // subject, and this module deliberately stays away from Postgres.
+      { provide: AuditService, useValue: { log: jest.fn().mockResolvedValue(undefined) } },
       { provide: ANTHROPIC_CLIENT, useValue: fakeClient() },
       { provide: VOICE_FEATURE_FLAG, useValue: { enabled: options.enabled } },
     ],

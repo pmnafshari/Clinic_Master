@@ -5,6 +5,7 @@ import { CancelAppointmentTool } from '../../src/modules/voice/tools/cancel-appo
 import { IdempotencyService } from '../../src/modules/voice/idempotency/idempotency.service';
 import { ToolRegistryService } from '../../src/modules/voice/tools/tool-registry.service';
 import { ToolExecutorService } from '../../src/modules/voice/tools/tool-executor.service';
+import { AuditService } from '../../src/modules/audit/audit.service';
 import { VoiceTool } from '../../src/modules/voice/tools/tool-definition.interface';
 import {
   createAnonymousSession,
@@ -20,6 +21,16 @@ import {
  *    real ToolExecutorService, further down). Calling execute() directly
  *    bypasses the tier gate and the session narrowing that are the whole point.
  */
+
+/**
+ * The executor audits every tool call it handles. What that record contains —
+ * and that it never carries the bearer sessionId — is covered in
+ * tool-audit.spec.ts; here the audit service only has to exist.
+ */
+function stubAudit(): AuditService {
+  return { log: jest.fn().mockResolvedValue(undefined) } as unknown as AuditService;
+}
+
 describe('write tools', () => {
   let idempotency: IdempotencyService;
 
@@ -183,7 +194,7 @@ describe('write tools — routed through ToolExecutorService', () => {
 
   beforeEach(() => {
     registry = new ToolRegistryService();
-    executor = new ToolExecutorService(registry);
+    executor = new ToolExecutorService(registry, stubAudit());
     idempotency = new IdempotencyService();
 
     patients = { create: jest.fn().mockResolvedValue({ id: 'p-new' }) };
@@ -460,7 +471,7 @@ describe('write tools — routed through ToolExecutorService', () => {
     delete flagless.needsPatientContext;
 
     const controlRegistry = new ToolRegistryService();
-    const controlExecutor = new ToolExecutorService(controlRegistry);
+    const controlExecutor = new ToolExecutorService(controlRegistry, stubAudit());
     controlRegistry.register(flagless);
     controlRegistry.register(
       new BookAppointmentTool(appointments as any, users as any, idempotency)

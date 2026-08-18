@@ -6,6 +6,7 @@ import {
 } from '../../src/modules/voice/agent/claude.agent';
 import { ToolRegistryService } from '../../src/modules/voice/tools/tool-registry.service';
 import { ToolExecutorService } from '../../src/modules/voice/tools/tool-executor.service';
+import { AuditService } from '../../src/modules/audit/audit.service';
 import { createAnonymousSession } from '../../src/modules/voice/session/voice-session';
 import { VOICE_CONFIG } from '../../src/modules/voice/voice.config';
 
@@ -52,13 +53,23 @@ function toolUseResponse(name: string, input: Record<string, unknown>, id = 'tu_
   };
 }
 
+
+/**
+ * The executor audits every tool call it handles. What that record contains —
+ * and that it never carries the bearer sessionId — is covered in
+ * tool-audit.spec.ts; here the audit service only has to exist.
+ */
+function stubAudit(): AuditService {
+  return { log: jest.fn().mockResolvedValue(undefined) } as unknown as AuditService;
+}
+
 describe('ClaudeAgentService', () => {
   let registry: ToolRegistryService;
   let executor: ToolExecutorService;
 
   beforeEach(() => {
     registry = new ToolRegistryService();
-    executor = new ToolExecutorService(registry);
+    executor = new ToolExecutorService(registry, stubAudit());
     registry.register({
       name: 'get_clinic_info',
       tier: 'public',
@@ -141,7 +152,7 @@ describe('ClaudeAgentService — every tool call goes through the executor', () 
 
   beforeEach(() => {
     registry = new ToolRegistryService();
-    executor = new ToolExecutorService(registry);
+    executor = new ToolExecutorService(registry, stubAudit());
   });
 
   it('dispatches a tool_use block through ToolExecutorService', async () => {

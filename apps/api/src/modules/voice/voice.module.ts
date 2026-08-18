@@ -3,6 +3,7 @@ import { AppointmentsModule } from '../appointments/appointments.module';
 import { PatientsModule } from '../patients/patients.module';
 import { UsersModule } from '../users/users.module';
 import { BillingModule } from '../billing/billing.module';
+import { AuditModule } from '../audit/audit.module';
 import { ToolRegistryService } from './tools/tool-registry.service';
 import { ToolExecutorService } from './tools/tool-executor.service';
 import { ClinicInfoTool } from './tools/clinic-info.tool';
@@ -21,7 +22,7 @@ import { VoiceController } from './voice.controller';
 import { VOICE_CONFIG, VOICE_FEATURE_FLAG } from './voice.config';
 
 @Module({
-  imports: [AppointmentsModule, UsersModule, BillingModule, PatientsModule],
+  imports: [AppointmentsModule, UsersModule, BillingModule, PatientsModule, AuditModule],
   controllers: [VoiceController],
   providers: [
     ClaudeAgentService,

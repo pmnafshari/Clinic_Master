@@ -16,6 +16,7 @@ import {
 import { createAnonymousSession } from '../../src/modules/voice/session/voice-session';
 import { ToolRegistryService } from '../../src/modules/voice/tools/tool-registry.service';
 import { ToolExecutorService } from '../../src/modules/voice/tools/tool-executor.service';
+import { AuditService } from '../../src/modules/audit/audit.service';
 import { IdempotencyService } from '../../src/modules/voice/idempotency/idempotency.service';
 import { VoiceToolResult } from '../../src/modules/voice/tools/tool-definition.interface';
 import { VOICE_FEATURE_FLAG } from '../../src/modules/voice/voice.config';
@@ -76,6 +77,9 @@ async function buildHarness(): Promise<Harness> {
       ToolExecutorService,
       ClaudeAgentService,
       IdempotencyService,
+      // The executor audits every call; what it writes is tool-audit.spec.ts's
+      // subject, and this module deliberately stays away from Postgres.
+      { provide: AuditService, useValue: { log: jest.fn().mockResolvedValue(undefined) } },
       { provide: ANTHROPIC_CLIENT, useValue: client },
       { provide: VOICE_FEATURE_FLAG, useValue: { enabled: true } },
     ],

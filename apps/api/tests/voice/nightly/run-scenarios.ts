@@ -1,6 +1,7 @@
 import { ClaudeAgentService, AnthropicLike } from '../../../src/modules/voice/agent/claude.agent';
 import { ToolRegistryService } from '../../../src/modules/voice/tools/tool-registry.service';
 import { ToolExecutorService } from '../../../src/modules/voice/tools/tool-executor.service';
+import { AuditService } from '../../../src/modules/audit/audit.service';
 import { ClinicInfoTool } from '../../../src/modules/voice/tools/clinic-info.tool';
 import { ServicePricingTool } from '../../../src/modules/voice/tools/service-pricing.tool';
 import { CheckAvailabilityTool } from '../../../src/modules/voice/tools/check-availability.tool';
@@ -62,7 +63,10 @@ export interface NightlyRunResult {
  */
 function buildToolWiring(): { registry: ToolRegistryService; executor: ToolExecutorService } {
   const registry = new ToolRegistryService();
-  const executor = new ToolExecutorService(registry);
+  // No database here either: the audit trail is a production concern, and this
+  // job is measuring agent behaviour, not persistence.
+  const audit = { log: async () => undefined } as unknown as AuditService;
+  const executor = new ToolExecutorService(registry, audit);
 
   const appointments = {
     getAvailability: async () => [{ time: '09:00', available: true }],

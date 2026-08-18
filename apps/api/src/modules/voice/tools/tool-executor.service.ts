@@ -2,12 +2,16 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ToolRegistryService } from './tool-registry.service';
 import { VoiceToolResult } from './tool-definition.interface';
 import { VoiceSession } from '../session/voice-session';
+import { AuditService } from '../../audit/audit.service';
 
 @Injectable()
 export class ToolExecutorService {
   private readonly logger = new Logger(ToolExecutorService.name);
 
-  constructor(private registry: ToolRegistryService) {}
+  constructor(
+    private registry: ToolRegistryService,
+    private audit: AuditService
+  ) {}
 
   /**
    * The single choke point for every tool call. Authorization happens here,
@@ -15,8 +19,21 @@ export class ToolExecutorService {
    *
    * Failures are returned rather than thrown: the model needs to hear that the
    * call did not succeed so it can say so, instead of the turn dying.
+   *
+   * Every call is audited on the way out, including the ones this method
+   * refused — see `record`.
    */
   async execute(
+    toolName: string,
+    input: Record<string, unknown>,
+    session: VoiceSession
+  ): Promise<VoiceToolResult> {
+    const result = await this.dispatch(toolName, input, session);
+    await this.record(toolName, session, result);
+    return result;
+  }
+
+  private async dispatch(
     toolName: string,
     input: Record<string, unknown>,
     session: VoiceSession
@@ -59,6 +76,55 @@ export class ToolExecutorService {
         error instanceof Error ? error.stack : String(error)
       );
       return { status: 'failed', error: 'tool_error' };
+    }
+  }
+
+  /**
+   * Writes the audit row for one tool call.
+   *
+   * Blocked and failed calls are audited exactly like successful ones — a
+   * refused attempt is precisely what an investigation into a disputed booking
+   * needs to see, so the early-return paths above run through here too.
+   *
+   * Three properties this method has to hold:
+   *
+   * - It runs after `dispatch` has fully settled, so it is outside whatever
+   *   transaction a write tool opened. An audit failure cannot roll a booking
+   *   back, and a booking's transaction cannot roll the audit row back.
+   * - A failure here is logged and swallowed. Auditing is an observer, never a
+   *   participant: a business operation that succeeded must not be reported to
+   *   the caller as failed because the audit insert fell over afterwards.
+   * - Only the outcome is recorded. Never the raw tool input and never the
+   *   result payload — a model can be talked into putting anything at all
+   *   (an API key, a date of birth, a phone number) into a tool argument, and
+   *   results carry patient data by design. Never `sessionId` or
+   *   `idempotencyNonce` either: those are bearer credentials, and
+   *   `sessionLogId` correlates the conversation without being one.
+   */
+  private async record(
+    toolName: string,
+    session: VoiceSession,
+    result: VoiceToolResult
+  ): Promise<void> {
+    try {
+      await this.audit.log({
+        userId: session.userId,
+        sessionLogId: session.logId,
+        entityType: 'VoiceToolCall',
+        entityId: session.patientId ?? 'unknown',
+        action: toolName,
+        newValues: {
+          status: result.status,
+          error: typeof result.error === 'string' ? result.error : null,
+          turnIndex: session.turnIndex,
+          identityVerified: session.identityVerified,
+        },
+      });
+    } catch (error) {
+      this.logger.error(
+        `Could not audit ${toolName} for session ${session.logId}`,
+        error instanceof Error ? error.stack : String(error)
+      );
     }
   }
 }

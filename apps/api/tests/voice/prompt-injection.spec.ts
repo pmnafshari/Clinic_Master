@@ -13,6 +13,7 @@ import { UsersService } from '../../src/modules/users/users.service';
 
 import { ToolRegistryService } from '../../src/modules/voice/tools/tool-registry.service';
 import { ToolExecutorService } from '../../src/modules/voice/tools/tool-executor.service';
+import { AuditService } from '../../src/modules/audit/audit.service';
 import {
   VoiceTool,
   VoiceToolResult,
@@ -212,10 +213,12 @@ interface Booted {
 }
 
 /**
- * Boots the real VoiceModule. The ONLY things replaced are the four services
- * that would otherwise talk to Postgres, and the Anthropic client inside the
- * real ClaudeAgentService (constructed here with the container's own registry
- * and executor, so the loop under test is the production loop).
+ * Boots the real VoiceModule. The ONLY things replaced are the five services
+ * that would otherwise talk to Postgres (AuditService among them — what it is
+ * asked to write is tool-audit.spec.ts's subject, not this file's), and the
+ * Anthropic client inside the real ClaudeAgentService (constructed here with
+ * the container's own registry and executor, so the loop under test is the
+ * production loop).
  */
 async function bootVoiceModule(): Promise<Booted> {
   const mocks = buildMocks();
@@ -230,6 +233,8 @@ async function bootVoiceModule(): Promise<Booted> {
     .useValue(mocks.patients)
     .overrideProvider(UsersService)
     .useValue(mocks.users)
+    .overrideProvider(AuditService)
+    .useValue({ log: jest.fn().mockResolvedValue(undefined) })
     .overrideProvider(ClaudeAgentService)
     .useFactory({
       factory: (registry: ToolRegistryService, executor: ToolExecutorService) =>

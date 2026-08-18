@@ -6,8 +6,19 @@ import { BillingService } from '../../src/modules/billing/billing.service';
 import { createVerifiedSession } from '../../src/modules/voice/session/voice-session';
 import { ToolRegistryService } from '../../src/modules/voice/tools/tool-registry.service';
 import { ToolExecutorService } from '../../src/modules/voice/tools/tool-executor.service';
+import { AuditService } from '../../src/modules/audit/audit.service';
 import { VoiceTool } from '../../src/modules/voice/tools/tool-definition.interface';
 import { createAnonymousSession } from '../../src/modules/voice/session/voice-session';
+
+
+/**
+ * The executor audits every tool call it handles. What that record contains —
+ * and that it never carries the bearer sessionId — is covered in
+ * tool-audit.spec.ts; here the audit service only has to exist.
+ */
+function stubAudit(): AuditService {
+  return { log: jest.fn().mockResolvedValue(undefined) } as unknown as AuditService;
+}
 
 describe('verified read tools', () => {
   const session = createVerifiedSession('s1', 'user-1', 'patient-1');
@@ -84,7 +95,7 @@ describe('verified read tools — routed through ToolExecutorService', () => {
 
   beforeEach(() => {
     registry = new ToolRegistryService();
-    executor = new ToolExecutorService(registry);
+    executor = new ToolExecutorService(registry, stubAudit());
 
     appointments = { findAll: jest.fn().mockResolvedValue([]) };
     billing = {
