@@ -31,6 +31,15 @@ export interface AgentTurn {
 /** Bound on tool round-trips within a single turn. */
 export const MAX_TOOL_ITERATIONS = 6;
 
+/**
+ * The one thing said when a turn cannot be completed truthfully: the iteration
+ * cap, a truncated response, and an SDK failure all end here. Shared so no path
+ * can drift into inventing a more reassuring sentence, and so nothing about the
+ * internal failure — provider, status code, token counts — reaches the caller.
+ */
+export const FRONT_DESK_FALLBACK_REPLY =
+  'I am having trouble with that. Let me put you through to the front desk.';
+
 @Injectable()
 export class ClaudeAgentService {
   private readonly logger = new Logger(ClaudeAgentService.name);
@@ -102,20 +111,44 @@ export class ClaudeAgentService {
     // place tier authorization and session narrowing happen. Every tool_use
     // block below goes through executor.execute.
     for (let iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration += 1) {
-      const response = await this.getClient().messages.create({
-        model: VOICE_CONFIG.model,
-        max_tokens: VOICE_CONFIG.maxTokens,
-        system: [
-          {
-            type: 'text',
-            text: SYSTEM_PROMPT,
-            cache_control: { type: 'ephemeral' },
-          },
-        ],
-        output_config: { effort: VOICE_CONFIG.effort },
-        tools: this.buildToolSchemas() as Anthropic.ToolUnion[],
-        messages,
-      });
+      let response: Anthropic.Message;
+      try {
+        response = await this.getClient().messages.create({
+          model: VOICE_CONFIG.model,
+          max_tokens: VOICE_CONFIG.maxTokens,
+          system: [
+            {
+              type: 'text',
+              text: SYSTEM_PROMPT,
+              cache_control: { type: 'ephemeral' },
+            },
+          ],
+          output_config: { effort: VOICE_CONFIG.effort },
+          tools: this.buildToolSchemas() as Anthropic.ToolUnion[],
+          messages,
+        });
+      } catch (error) {
+        // An SDK error message carries the HTTP status and the provider's JSON
+        // body — 'invalid x-api-key', a rate-limit body, 'prompt is too long:
+        // N tokens'. This endpoint is anonymous, and the global exception
+        // filter returns `exception.message` verbatim, so an uncaught throw
+        // here would hand an unauthenticated caller the upstream provider's
+        // identity and this process's internal state. The real error is logged
+        // server-side; the caller gets the same sentence as any other failure.
+        //
+        // logId, never sessionId or idempotencyNonce: both are bearer values
+        // and logs are readable by people who must not be able to resume a
+        // call or address another session's idempotency namespace.
+        this.logger.error(
+          `Model call failed for session ${session.logId}`,
+          error instanceof Error ? error.stack : String(error)
+        );
+        return {
+          reply: FRONT_DESK_FALLBACK_REPLY,
+          toolCalls,
+          history: messages,
+        };
+      }
 
       // A refusal arrives on a successful HTTP 200 and can carry partial
       // content, so this is checked before `content` is read at all.
@@ -126,6 +159,30 @@ export class ClaudeAgentService {
         return {
           reply:
             'I am sorry, I cannot help with that. Let me put you through to the clinic.',
+          toolCalls,
+          history: messages,
+        };
+      }
+
+      /**
+       * Truncation. When the budget runs out the API returns HTTP 200 with
+       * `stop_reason: 'max_tokens'` and whatever it had produced so far —
+       * commonly a partial or entirely absent `tool_use` block. Without this
+       * branch the `toolUses.length === 0` path below reads the partial text
+       * and returns it as a finished reply, so a booking turn cut off before it
+       * called `book_appointment` is narrated to the caller as a completed
+       * booking.
+       *
+       * Returning before the assistant message is appended also keeps history
+       * well formed: a truncated `tool_use` retained without its `tool_result`
+       * is a 400 on the next request.
+       */
+      if (response.stop_reason === 'max_tokens') {
+        this.logger.warn(
+          `Model response hit max_tokens for session ${session.logId}`
+        );
+        return {
+          reply: FRONT_DESK_FALLBACK_REPLY,
           toolCalls,
           history: messages,
         };
@@ -170,7 +227,7 @@ export class ClaudeAgentService {
 
     this.logger.warn(`Turn hit the iteration cap for session ${session.logId}`);
     return {
-      reply: 'I am having trouble with that. Let me put you through to the front desk.',
+      reply: FRONT_DESK_FALLBACK_REPLY,
       toolCalls,
       history: messages,
     };

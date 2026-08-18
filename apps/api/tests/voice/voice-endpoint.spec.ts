@@ -1,11 +1,17 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import { Test, TestingModule } from '@nestjs/testing';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { APP_GUARD } from '@nestjs/core';
+import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import * as request from 'supertest';
 
-import { VoiceController } from '../../src/modules/voice/voice.controller';
+import {
+  MAX_HISTORY_TURNS,
+  trimHistory,
+  VoiceController,
+} from '../../src/modules/voice/voice.controller';
 import { VoiceTextDto } from '../../src/modules/voice/dto/voice-text.dto';
 import {
   ClaudeAgentService,
@@ -289,5 +295,271 @@ describe('POST /api/voice/text — identity injection', () => {
     expect(response.body.verified).toBe(false);
     expect(JSON.stringify(response.body)).not.toContain('p-victim');
     expect(JSON.stringify(response.body)).not.toContain('u-attacker');
+  });
+});
+
+/**
+ * The route is anonymous and one request can drive up to MAX_TOOL_ITERATIONS
+ * calls to a frontier model, so the global 100/min/IP allows several hundred
+ * paid model calls a minute from a single unauthenticated source. These tests
+ * build the app WITH the throttler wired the way main.ts wires it, since the
+ * suites above deliberately omit it.
+ */
+describe('POST /api/voice/text — rate limiting', () => {
+  async function buildThrottledApp(): Promise<INestApplication> {
+    const moduleRef: TestingModule = await Test.createTestingModule({
+      imports: [ThrottlerModule.forRoot([{ name: 'default', ttl: 60000, limit: 100 }])],
+      controllers: [VoiceController],
+      providers: [
+        ToolRegistryService,
+        ToolExecutorService,
+        ClaudeAgentService,
+        { provide: AuditService, useValue: { log: jest.fn().mockResolvedValue(undefined) } },
+        { provide: ANTHROPIC_CLIENT, useValue: fakeClient() },
+        { provide: VOICE_FEATURE_FLAG, useValue: { enabled: true } },
+        { provide: APP_GUARD, useClass: ThrottlerGuard },
+      ],
+    }).compile();
+
+    const app = moduleRef.createNestApplication();
+    app.setGlobalPrefix('api');
+    app.useGlobalPipes(
+      new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true })
+    );
+    await app.init();
+    return app;
+  }
+
+  let app: INestApplication;
+
+  beforeEach(async () => {
+    app = await buildThrottledApp();
+  });
+
+  afterEach(async () => {
+    await app.close();
+  });
+
+  /**
+   * The route limit is far below the module's 100/min, so the rejection below
+   * can only come from the per-handler @Throttle — not from the global default.
+   */
+  it('rejects a caller who exceeds the per-route turn limit', async () => {
+    const send = () =>
+      request(app.getHttpServer()).post('/api/voice/text').send({ message: 'hello' });
+
+    const statuses: number[] = [];
+    for (let i = 0; i < 15; i += 1) {
+      statuses.push((await send()).status);
+    }
+
+    // Fifteen requests is well under the module's 100/min bucket, so a 429 in
+    // this window can only have come from the handler's own @Throttle.
+    expect(statuses).toContain(429);
+    expect(statuses.filter((status) => status === 200).length).toBeGreaterThan(0);
+    expect(statuses[0]).toBe(200);
+    expect(statuses[statuses.length - 1]).toBe(429);
+  });
+
+  it('serves an ordinary conversational exchange without throttling it', async () => {
+    for (let i = 0; i < 3; i += 1) {
+      await request(app.getHttpServer())
+        .post('/api/voice/text')
+        .send({ message: 'hello' })
+        .expect(200);
+    }
+  });
+});
+
+/**
+ * Every turn resends the whole transcript, so an untrimmed history makes cost
+ * quadratic in turn count and eventually overflows the context window — a 400
+ * that recurs on every retry, because the stored history that caused it is what
+ * gets resent.
+ *
+ * The constraint that makes this non-trivial: an assistant `tool_use` block
+ * whose matching `tool_result` was trimmed away is an API error, not a degraded
+ * reply. So the cut must land on a turn boundary.
+ */
+describe('trimHistory', () => {
+  function userText(text: string): Anthropic.MessageParam {
+    return { role: 'user', content: text };
+  }
+
+  function assistantToolUse(id: string): Anthropic.MessageParam {
+    return {
+      role: 'assistant',
+      content: [{ type: 'tool_use', id, name: 'get_clinic_info', input: {} }],
+    };
+  }
+
+  function toolResult(id: string): Anthropic.MessageParam {
+    return {
+      role: 'user',
+      content: [{ type: 'tool_result', tool_use_id: id, content: '{}' }],
+    };
+  }
+
+  function assistantText(text: string): Anthropic.MessageParam {
+    return { role: 'assistant', content: [{ type: 'text', text }] };
+  }
+
+  /** One user turn that used a tool: speech, tool_use, tool_result, reply. */
+  function toolTurn(n: number): Anthropic.MessageParam[] {
+    return [
+      userText(`turn ${n}`),
+      assistantToolUse(`tu_${n}`),
+      toolResult(`tu_${n}`),
+      assistantText(`reply ${n}`),
+    ];
+  }
+
+  /**
+   * A literal, for the same reason voice-config.spec pins maxTokens: every
+   * other assertion here compares the trimmed result against MAX_HISTORY_TURNS
+   * itself, so all of them stay green if the constant is set to 1 — which would
+   * silently amputate the conversation after a single turn. The number is a
+   * judgement call about how much context a caller needs; if it is changed on
+   * purpose, change this literal too rather than deleting it.
+   */
+  it('keeps a deliberate number of turns', () => {
+    expect(MAX_HISTORY_TURNS).toBe(12);
+  });
+
+  it('leaves a short conversation untouched', () => {
+    const history = [...toolTurn(1), ...toolTurn(2)];
+    expect(trimHistory(history)).toEqual(history);
+  });
+
+  it('caps a long conversation at the configured number of turns', () => {
+    const history = Array.from({ length: 40 }, (_, i) => toolTurn(i)).flat();
+
+    const trimmed = trimHistory(history);
+
+    const turnStarts = trimmed.filter(
+      (message) => message.role === 'user' && typeof message.content === 'string'
+    );
+    expect(turnStarts).toHaveLength(MAX_HISTORY_TURNS);
+    expect(trimmed.length).toBeLessThan(history.length);
+  });
+
+  it('keeps the most recent turns, not the oldest', () => {
+    const history = Array.from({ length: 40 }, (_, i) => toolTurn(i)).flat();
+
+    const serialised = JSON.stringify(trimHistory(history));
+
+    expect(serialised).toContain('turn 39');
+    expect(serialised).not.toContain('turn 0');
+  });
+
+  /**
+   * The failure this guards against is not a worse answer, it is a 400: the API
+   * rejects an assistant tool_use with no matching tool_result, and a
+   * tool_result with no matching tool_use.
+   */
+  it('never orphans a tool_use from its tool_result', () => {
+    const history = Array.from({ length: 40 }, (_, i) => toolTurn(i)).flat();
+
+    const trimmed = trimHistory(history);
+
+    const toolUseIds = new Set<string>();
+    const toolResultIds = new Set<string>();
+    for (const message of trimmed) {
+      if (typeof message.content === 'string') continue;
+      for (const block of message.content) {
+        if (block.type === 'tool_use') toolUseIds.add(block.id);
+        if (block.type === 'tool_result') toolResultIds.add(block.tool_use_id);
+      }
+    }
+
+    expect([...toolUseIds].sort()).toEqual([...toolResultIds].sort());
+  });
+
+  it('always cuts at the start of a user turn, never mid tool exchange', () => {
+    const history = Array.from({ length: 40 }, (_, i) => toolTurn(i)).flat();
+
+    const first = trimHistory(history)[0];
+
+    expect(first.role).toBe('user');
+    expect(typeof first.content).toBe('string');
+  });
+
+  it('does not cut a turn that used many tools into pieces', () => {
+    // A turn with three tool round-trips is still ONE turn, so it survives or
+    // is dropped whole.
+    const busy: Anthropic.MessageParam[] = [
+      userText('busy turn'),
+      assistantToolUse('tu_a'),
+      toolResult('tu_a'),
+      assistantToolUse('tu_b'),
+      toolResult('tu_b'),
+      assistantToolUse('tu_c'),
+      toolResult('tu_c'),
+      assistantText('done'),
+    ];
+    const history = [...Array.from({ length: 20 }, (_, i) => toolTurn(i)).flat(), ...busy];
+
+    const trimmed = trimHistory(history);
+    const serialised = JSON.stringify(trimmed);
+
+    expect(serialised).toContain('tu_a');
+    expect(serialised).toContain('tu_c');
+    expect(trimmed).toContain(busy[0]);
+  });
+});
+
+/**
+ * The trim has to reach the model, not merely exist as a helper.
+ */
+describe('POST /api/voice/text — history is bounded across a long conversation', () => {
+  it('stops growing the transcript it sends to the model', async () => {
+    const sent: number[] = [];
+    const countingClient: AnthropicLike = {
+      messages: {
+        create: async (params) => {
+          sent.push(params.messages.length);
+          return {
+            stop_reason: 'end_turn',
+            content: [{ type: 'text', text: 'Noted.', citations: null }],
+          } as unknown as Anthropic.Message;
+        },
+      },
+    };
+
+    const moduleRef: TestingModule = await Test.createTestingModule({
+      controllers: [VoiceController],
+      providers: [
+        ToolRegistryService,
+        ToolExecutorService,
+        ClaudeAgentService,
+        { provide: AuditService, useValue: { log: jest.fn().mockResolvedValue(undefined) } },
+        { provide: ANTHROPIC_CLIENT, useValue: countingClient },
+        { provide: VOICE_FEATURE_FLAG, useValue: { enabled: true } },
+      ],
+    }).compile();
+
+    const app = moduleRef.createNestApplication();
+    app.setGlobalPrefix('api');
+    app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
+    await app.init();
+
+    try {
+      let sessionId: string | undefined;
+      for (let i = 0; i < MAX_HISTORY_TURNS + 10; i += 1) {
+        const response = await request(app.getHttpServer())
+          .post('/api/voice/text')
+          .send({ ...(sessionId ? { sessionId } : {}), message: `turn ${i}` })
+          .expect(200);
+        sessionId = response.body.sessionId;
+      }
+
+      // Unbounded, the last request would carry two messages per turn for
+      // twenty-two turns. The cap holds it flat instead.
+      const last = sent[sent.length - 1];
+      expect(last).toBeLessThanOrEqual(MAX_HISTORY_TURNS * 2 + 1);
+      expect(last).toBe(sent[sent.length - 2]);
+    } finally {
+      await app.close();
+    }
   });
 });

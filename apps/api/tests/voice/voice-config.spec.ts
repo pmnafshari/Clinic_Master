@@ -10,6 +10,27 @@ describe('voice config', () => {
     expect(VOICE_CONFIG.effort).toBe('low');
   });
 
+  /**
+   * The literal is deliberate, and it is the only assertion in the repo that can
+   * catch a bad value.
+   *
+   * The agent test asserts `calls[0].max_tokens === VOICE_CONFIG.maxTokens`,
+   * which compares the production value against itself: it proves the number is
+   * forwarded and says nothing about whether the number is usable. Setting
+   * maxTokens to 128 left the entire suite green.
+   *
+   * The number has to be big enough for three things sharing one budget:
+   * adaptive thinking (on by default on Opus 5 and deliberately not disabled),
+   * the arguments for ten tool schemas, and the sentence read back to the
+   * caller. When it is not, the API returns `stop_reason: 'max_tokens'` with a
+   * half-finished turn — which claude.agent.ts now refuses to narrate, but the
+   * caller still loses the turn. If this assertion is failing because the budget
+   * was tuned on purpose, change the literal; do not delete it.
+   */
+  it('budgets max_tokens for thinking, tool arguments and the reply together', () => {
+    expect(VOICE_CONFIG.maxTokens).toBe(8192);
+  });
+
   it('exposes clinic facts for the public tools', () => {
     expect(CLINIC_INFO.hours).toBeDefined();
     expect(CLINIC_INFO.address).toBeDefined();

@@ -100,7 +100,7 @@ async function buildHarness(): Promise<Harness> {
     description: 'book an appointment',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     execute: async (_input, session) => {
-      const key = idempotency.keyFor(session, 'book_appointment');
+      const key = idempotency.keyFor(session, 'book_appointment', _input);
       keysUsed.push(key);
       return idempotency.runOnce(key, bookOperation);
     },
@@ -378,8 +378,9 @@ describe('an evicted session cannot replay a stale confirmed write', () => {
     before.turnIndex = 1;
     after.turnIndex = 1;
 
-    const keyBefore = harness.idempotency.keyFor(before, 'book_appointment');
-    const keyAfter = harness.idempotency.keyFor(after, 'book_appointment');
+    const input = { startTime: '2026-09-01T09:00:00.000Z' };
+    const keyBefore = harness.idempotency.keyFor(before, 'book_appointment', input);
+    const keyAfter = harness.idempotency.keyFor(after, 'book_appointment', input);
 
     expect(before.sessionId).toBe(after.sessionId);
     expect(before.turnIndex).toBe(after.turnIndex);

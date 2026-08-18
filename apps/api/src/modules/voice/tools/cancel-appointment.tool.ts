@@ -49,7 +49,7 @@ export class CancelAppointmentTool implements VoiceTool {
       return { status: 'failed', error: 'not_your_appointment' };
     }
 
-    const key = this.idempotency.keyFor(session, this.name);
+    const key = this.idempotency.keyFor(session, this.name, input);
 
     return this.idempotency.runOnce(key, async () => {
       try {

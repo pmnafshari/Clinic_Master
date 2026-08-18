@@ -50,7 +50,7 @@ export class BookAppointmentTool implements VoiceTool {
       return { status: 'failed', error: 'no_patient_in_session' };
     }
 
-    const key = this.idempotency.keyFor(session, this.name);
+    const key = this.idempotency.keyFor(session, this.name, input);
 
     return this.idempotency.runOnce(key, async () => {
       const providers = await this.users.findProviders();

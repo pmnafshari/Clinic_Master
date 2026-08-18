@@ -10,6 +10,7 @@ import {
   Post,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import { ClaudeAgentService } from './agent/claude.agent';
 import { createAnonymousSession, VoiceSession } from './session/voice-session';
 
@@ -22,6 +23,60 @@ export const SESSION_TTL_MS = 30 * 60 * 1000;
 
 /** Hard ceiling on concurrently tracked conversations. */
 export const MAX_ACTIVE_SESSIONS = 1000;
+
+/**
+ * How many complete user turns of transcript are resent to the model.
+ *
+ * Every turn resends the whole history, so cost is quadratic in turn count and
+ * an unbounded transcript eventually exceeds the context window — a 400 that
+ * ends the conversation permanently, since the stored history that caused it is
+ * resent on every retry. BoundedTtlMap caps how MANY conversations are held,
+ * not how large any one of them gets.
+ *
+ * Twelve turns is chosen against the job: an intake-then-book conversation runs
+ * roughly eight to ten turns, so a caller can complete one and still refer back
+ * to a name or a date they gave at the start. Beyond that the early turns are
+ * small talk the model does not need. Each retained turn also drags its tool
+ * traffic along, so twelve turns is a good deal more than twelve messages.
+ */
+export const MAX_HISTORY_TURNS = 12;
+
+/** True when a user message is a batch of tool_results rather than speech. */
+function isToolResultMessage(message: Anthropic.MessageParam): boolean {
+  return (
+    Array.isArray(message.content) &&
+    message.content.some((block) => block.type === 'tool_result')
+  );
+}
+
+/**
+ * Keeps the last `maxTurns` user turns and everything that followed each.
+ *
+ * Cutting at an arbitrary index is not safe: an assistant `tool_use` block whose
+ * matching `tool_result` was trimmed away — or a `tool_result` whose `tool_use`
+ * was — is a 400 from the API, not a degraded reply. So the only cut points
+ * considered are the messages that START a user turn: role 'user' carrying
+ * speech rather than tool_results. Slicing at one of those keeps every tool_use
+ * paired with its tool_result, because a turn's tool traffic sits entirely
+ * between two such messages.
+ */
+export function trimHistory(
+  history: Anthropic.MessageParam[],
+  maxTurns: number = MAX_HISTORY_TURNS
+): Anthropic.MessageParam[] {
+  const turnStarts: number[] = [];
+  history.forEach((message, index) => {
+    if (message.role === 'user' && !isToolResultMessage(message)) {
+      turnStarts.push(index);
+    }
+  });
+
+  if (turnStarts.length <= maxTurns) {
+    return history;
+  }
+
+  return history.slice(turnStarts[turnStarts.length - maxTurns]);
+}
 
 interface Conversation {
   session: VoiceSession;
@@ -54,6 +109,14 @@ export class VoiceController {
     );
   }
 
+  /**
+   * Tighter than the global 100/min/IP, because a request here is not cheap:
+   * one turn can drive up to MAX_TOOL_ITERATIONS calls to a frontier model, so
+   * the global limit permits several hundred paid model calls a minute from a
+   * single anonymous IP. Ten turns a minute is more than a person speaking to a
+   * receptionist will ever need and takes the worst case down with it.
+   */
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
   @Post('text')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Send a text turn to the voice agent (Phase 0, no audio)' })
@@ -104,7 +167,7 @@ export class VoiceController {
     const turn = await this.agent.respond(
       conversation.session,
       dto.message,
-      conversation.history
+      trimHistory(conversation.history)
     );
     conversation.history = turn.history;
 

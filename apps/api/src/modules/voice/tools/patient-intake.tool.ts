@@ -44,7 +44,7 @@ export class PatientIntakeTool implements VoiceTool {
     input: Record<string, unknown>,
     session: VoiceSession
   ): Promise<VoiceToolResult> {
-    const key = this.idempotency.keyFor(session, this.name);
+    const key = this.idempotency.keyFor(session, this.name, input);
 
     const result = await this.idempotency.runOnce(key, async () => {
       try {

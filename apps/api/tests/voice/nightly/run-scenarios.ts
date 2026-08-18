@@ -86,13 +86,20 @@ function buildToolWiring(): { registry: ToolRegistryService; executor: ToolExecu
  * `client` — no network call, no API key, no spend. The entrypoint is the
  * only place a real Anthropic client is constructed and passed in here.
  *
- * The budget is enforced twice. Primarily inside UsageTrackingClient, which
- * throws BudgetExceededError the instant a single API call's usage pushes
- * the running total over budget — this fires mid-scenario, before a
- * runaway tool loop can make its remaining calls (up to
- * MAX_TOOL_ITERATIONS). Secondarily as a backstop check after each
- * scenario's turn completes normally, kept in case the per-call enforcement
- * is ever bypassed. The same `tracker` also wraps every call the LLM judge
+ * The budget is enforced by UsageTrackingClient, which throws
+ * BudgetExceededError the instant a single API call's usage pushes the
+ * running total over budget — this fires mid-scenario, before a runaway tool
+ * loop can make its remaining calls (up to MAX_TOOL_ITERATIONS). That throw
+ * is what stops the spending.
+ *
+ * How the harness OBSERVES the trip differs by call path. The judge is called
+ * directly here, so its BudgetExceededError propagates and is caught below.
+ * The agent's own calls are not: ClaudeAgentService absorbs any client error
+ * and returns a fallback reply, because that same code path answers an
+ * anonymous caller who must never see a provider error. So the agent path is
+ * checked against `tracker.usage` after every turn instead. There is a third
+ * check at the end of each scenario, kept as a backstop in case the per-call
+ * enforcement is ever bypassed. The same `tracker` also wraps every call the LLM judge
  * makes (see the `expectRefusal` branch below), so a judge call counts
  * against this exact budget too — it is not a separate, unaccounted spend
  * path.
@@ -114,18 +121,25 @@ export async function runNightlyScenarios(
   for (const scenario of scenarios) {
     const session = createAnonymousSession(`nightly-${scenario.name}`);
 
-    let turn;
-    try {
-      turn = await agent.respond(session, scenario.message, []);
-    } catch (error) {
-      if (error instanceof BudgetExceededError) {
-        failures.push(
-          `token budget exceeded during "${scenario.name}": used ${error.totalTokens}, ` +
-            `budget is ${error.budget}`
-        );
-        break;
-      }
-      throw error;
+    // ClaudeAgentService absorbs every error its client throws and returns a
+    // fallback reply, deliberately: the same code path serves an anonymous
+    // caller who must never be shown a provider error message. So a
+    // BudgetExceededError raised inside UsageTrackingClient no longer escapes
+    // `respond`.
+    //
+    // Spending still stops the instant the budget trips — the throw ends that
+    // turn's tool loop immediately, so no further API call is made — but the
+    // harness now learns about it from the tracker's own running total rather
+    // than from a propagating exception. Checked before `scenariosRun` is
+    // incremented: a scenario whose turn was cut short did not run.
+    const turn = await agent.respond(session, scenario.message, []);
+
+    if (tracker.usage.totalTokens > budget) {
+      failures.push(
+        `token budget exceeded during "${scenario.name}": used ${tracker.usage.totalTokens}, ` +
+          `budget is ${budget}`
+      );
+      break;
     }
 
     scenariosRun += 1;

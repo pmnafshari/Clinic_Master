@@ -1,8 +1,10 @@
 import type Anthropic from '@anthropic-ai/sdk';
+import { Logger } from '@nestjs/common';
 import { SYSTEM_PROMPT } from '../../src/modules/voice/agent/system-prompt';
 import {
   ClaudeAgentService,
   AnthropicLike,
+  FRONT_DESK_FALLBACK_REPLY,
 } from '../../src/modules/voice/agent/claude.agent';
 import { ToolRegistryService } from '../../src/modules/voice/tools/tool-registry.service';
 import { ToolExecutorService } from '../../src/modules/voice/tools/tool-executor.service';
@@ -121,6 +123,9 @@ describe('ClaudeAgentService', () => {
 
     expect(calls).toHaveLength(1);
     expect(calls[0].model).toBe(VOICE_CONFIG.model);
+    // Wiring only: this says the agent forwards the configured budget, and it
+    // cannot say whether the budget is a sane number — both sides come from
+    // the same constant. The VALUE is pinned to a literal in voice-config.spec.
     expect(calls[0].max_tokens).toBe(VOICE_CONFIG.maxTokens);
     expect(calls[0].output_config?.effort).toBe(VOICE_CONFIG.effort);
     expect(JSON.stringify(calls[0].system)).toContain('automated assistant');
@@ -261,5 +266,176 @@ describe('ClaudeAgentService — every tool call goes through the executor', () 
 
     expect(turn.reply).not.toContain('Here is how you would');
     expect(turn.reply).toMatch(/cannot help with that/i);
+  });
+});
+
+/**
+ * Two ways a turn can end without a real answer. Both used to reach the caller
+ * as if they were one: truncation was narrated as a finished reply, and an SDK
+ * error propagated out of the controller into the global exception filter,
+ * which returns `exception.message` verbatim to an anonymous client.
+ */
+describe('ClaudeAgentService — a turn that cannot be completed truthfully', () => {
+  let registry: ToolRegistryService;
+  let executor: ToolExecutorService;
+
+  beforeEach(() => {
+    registry = new ToolRegistryService();
+    executor = new ToolExecutorService(registry, stubAudit());
+    registry.register({
+      name: 'book_appointment',
+      tier: 'public',
+      description: 'book',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      execute: async () => ({ status: 'confirmed' as const, appointmentId: 'a1' }),
+    });
+  });
+
+  /**
+   * Running out of max_tokens is an HTTP 200 carrying whatever had been
+   * produced so far. Reading only `stop_reason === 'refusal'` lets that partial
+   * text fall through to the no-tool-calls return, so half a sentence about a
+   * booking is handed back as the completed turn.
+   */
+  it('does not return truncated text as a finished answer', async () => {
+    const { client } = makeClient([
+      {
+        stop_reason: 'max_tokens',
+        content: [
+          { type: 'text', text: 'Sure — I have booked you in for Tues', citations: null },
+        ] as Anthropic.ContentBlock[],
+      },
+    ]);
+    const agent = new ClaudeAgentService(registry, executor, client);
+
+    const turn = await agent.respond(createAnonymousSession('s1'), 'book me Tuesday', []);
+
+    expect(turn.reply).not.toContain('I have booked you in');
+    expect(turn.reply).toBe(FRONT_DESK_FALLBACK_REPLY);
+    expect(turn.reply).toMatch(/front desk/i);
+  });
+
+  /**
+   * The dangerous shape: truncated before the tool_use block was complete. No
+   * tool ran, so nothing is booked — and the partial text must not say it was.
+   */
+  it('does not run or narrate a tool call that was cut off mid-block', async () => {
+    const ran = jest.spyOn(executor, 'execute');
+    const { client } = makeClient([
+      {
+        stop_reason: 'max_tokens',
+        content: [
+          { type: 'text', text: 'Booking that now', citations: null },
+        ] as Anthropic.ContentBlock[],
+      },
+    ]);
+    const agent = new ClaudeAgentService(registry, executor, client);
+
+    const turn = await agent.respond(createAnonymousSession('s1'), 'book me Tuesday', []);
+
+    expect(ran).not.toHaveBeenCalled();
+    expect(turn.toolCalls).toEqual([]);
+    expect(turn.reply).toBe(FRONT_DESK_FALLBACK_REPLY);
+  });
+
+  /**
+   * A truncated assistant turn must not be appended to the transcript: a
+   * tool_use block retained without its matching tool_result is a 400 on the
+   * very next request, which would wedge the conversation permanently.
+   */
+  it('keeps the truncated assistant turn out of the returned history', async () => {
+    const { client } = makeClient([
+      {
+        stop_reason: 'max_tokens',
+        content: [
+          { type: 'tool_use', id: 'tu_partial', name: 'book_appointment', input: {} },
+        ] as Anthropic.ContentBlock[],
+      },
+    ]);
+    const agent = new ClaudeAgentService(registry, executor, client);
+
+    const turn = await agent.respond(createAnonymousSession('s1'), 'book me Tuesday', []);
+
+    expect(JSON.stringify(turn.history)).not.toContain('tu_partial');
+    expect(turn.history.every((message) => message.role !== 'assistant')).toBe(true);
+  });
+
+  /**
+   * An Anthropic APIError message carries the HTTP status and the provider's
+   * JSON body. The route is anonymous and the global exception filter returns
+   * `exception.message` as-is, so an uncaught throw here publishes the upstream
+   * provider and this process's internal state to whoever asked.
+   */
+  it('returns the fallback reply when the SDK throws, without leaking the provider message', async () => {
+    const leaky = new Error(
+      '429 {"type":"error","error":{"type":"rate_limit_error",' +
+        '"message":"prompt is too long: 214331 tokens > 200000 maximum"}}'
+    );
+    const client: AnthropicLike = {
+      messages: {
+        create: async () => {
+          throw leaky;
+        },
+      },
+    };
+    const agent = new ClaudeAgentService(registry, executor, client);
+
+    const turn = await agent.respond(createAnonymousSession('s1'), 'book me Tuesday', []);
+
+    expect(turn.reply).toBe(FRONT_DESK_FALLBACK_REPLY);
+    expect(turn.reply).not.toContain('429');
+    expect(turn.reply).not.toContain('rate_limit_error');
+    expect(turn.reply).not.toContain('prompt is too long');
+    expect(turn.reply).not.toContain('200000');
+  });
+
+  it('does not throw the SDK error out of respond()', async () => {
+    const client: AnthropicLike = {
+      messages: {
+        create: async () => {
+          throw new Error('401 {"error":{"message":"invalid x-api-key"}}');
+        },
+      },
+    };
+    const agent = new ClaudeAgentService(registry, executor, client);
+
+    await expect(
+      agent.respond(createAnonymousSession('s1'), 'hours?', [])
+    ).resolves.toMatchObject({ reply: FRONT_DESK_FALLBACK_REPLY });
+  });
+
+  /**
+   * The failure is not silent — it is logged, with the non-secret logId. The
+   * sessionId is a bearer credential and the idempotencyNonce namespaces this
+   * session's writes; neither may appear in a log line.
+   */
+  it('logs the failure with logId, never the sessionId or the nonce', async () => {
+    const client: AnthropicLike = {
+      messages: {
+        create: async () => {
+          throw new Error('500 upstream exploded');
+        },
+      },
+    };
+    const agent = new ClaudeAgentService(registry, executor, client);
+    const session = createAnonymousSession('sess-secret-bearer-value');
+
+    const logged: string[] = [];
+    const spy = jest
+      .spyOn(Logger.prototype, 'error')
+      .mockImplementation((...args: unknown[]) => {
+        logged.push(args.map((a) => String(a)).join(' '));
+      });
+
+    try {
+      await agent.respond(session, 'hours?', []);
+    } finally {
+      spy.mockRestore();
+    }
+
+    const all = logged.join('\n');
+    expect(all).toContain(session.logId);
+    expect(all).not.toContain(session.sessionId);
+    expect(all).not.toContain(session.idempotencyNonce);
   });
 });

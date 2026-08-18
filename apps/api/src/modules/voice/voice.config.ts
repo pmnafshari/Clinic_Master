@@ -9,7 +9,16 @@ export const VOICE_CONFIG = {
   // Opus 5 can cause tool calls to be emitted as plain text, which completes
   // the turn without running the tool — a silent booking failure.
   effort: 'low' as const,
-  maxTokens: 2048,
+  /**
+   * `max_tokens` is the budget for thinking AND the visible reply together, not
+   * the reply alone. Thinking is on by default on Opus 5 and is deliberately not
+   * disabled (see above), so a booking turn spends this budget on reasoning, ten
+   * tool schemas' worth of arguments, and the sentence read back to the caller.
+   * 2048 was low enough to truncate mid-turn, which the API reports as
+   * `stop_reason: 'max_tokens'` — handled explicitly in claude.agent.ts rather
+   * than narrated as a finished answer.
+   */
+  maxTokens: 8192,
 };
 
 /**

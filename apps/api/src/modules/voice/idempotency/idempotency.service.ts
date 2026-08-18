@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import { Inject, Injectable, Optional } from '@nestjs/common';
 import { VoiceToolResult } from '../tools/tool-definition.interface';
 import { VoiceSession } from '../session/voice-session';
@@ -71,13 +72,39 @@ export class IdempotencyService {
    * turn is the entire point of this class, and dropping it would collapse two
    * legitimate bookings in one conversation into one.
    *
+   * The tool input is in the key too, as a hash. A single assistant turn can
+   * carry several `tool_use` blocks of the same tool — "book me Tuesday and
+   * Thursday" is one turn with two `book_appointment` calls. Keyed on
+   * nonce:turn:tool alone those two share a key, the second joins the first's
+   * cache entry, and the agent narrates two appointments where one exists.
+   * Hashing the input separates them while leaving the property this class is
+   * for intact: a genuine retry replays byte-identical input, so it hashes to
+   * the same value and still de-duplicates.
+   *
    * Each component is still percent-encoded before joining, so ':' (and '%'
-   * itself) cannot occur inside a component and the mapping from triple to key
-   * stays injective. That is now a backstop twice over: the nonce is generated
-   * server-side from a CSPRNG and contains no character that needs escaping.
+   * itself) cannot occur inside a component and the mapping from tuple to key
+   * stays injective. That is now a backstop several times over: the nonce is
+   * generated server-side from a CSPRNG and the digest is hex.
    */
-  keyFor(session: VoiceSession, toolName: string): string {
-    return [String(session.idempotencyNonce), String(session.turnIndex), String(toolName)]
+  keyFor(
+    session: VoiceSession,
+    toolName: string,
+    input: Record<string, unknown>
+  ): string {
+    // Key order is the order the model emitted, preserved through JSON.parse,
+    // so a replayed request reproduces the same string. The hash is a namespace
+    // separator, not a security boundary — a collision would merge two writes,
+    // which is what SHA-256 makes unreachable.
+    const inputHash = createHash('sha256')
+      .update(JSON.stringify(input ?? {}))
+      .digest('hex');
+
+    return [
+      String(session.idempotencyNonce),
+      String(session.turnIndex),
+      String(toolName),
+      inputHash,
+    ]
       .map((part) => encodeURIComponent(part))
       .join(':');
   }

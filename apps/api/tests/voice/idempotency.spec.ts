@@ -5,6 +5,14 @@ import {
 } from '../../src/modules/voice/idempotency/idempotency.service';
 import { createVerifiedSession } from '../../src/modules/voice/session/voice-session';
 import { VoiceToolResult } from '../../src/modules/voice/tools/tool-definition.interface';
+import { createHash } from 'crypto';
+
+/** One representative tool input, so key comparisons vary only where intended. */
+const INPUT = { startTime: '2026-09-01T09:00:00.000Z', endTime: '2026-09-01T09:30:00.000Z' };
+
+function hashOf(input: Record<string, unknown>): string {
+  return createHash('sha256').update(JSON.stringify(input)).digest('hex');
+}
 
 describe('IdempotencyService', () => {
   let service: IdempotencyService;
@@ -13,11 +21,43 @@ describe('IdempotencyService', () => {
     service = new IdempotencyService();
   });
 
-  it('builds a key from the session nonce, turn and tool name', () => {
+  it('builds a key from the session nonce, turn, tool name and input hash', () => {
     const session = createVerifiedSession('s1', 'u1', 'p1');
     session.turnIndex = 3;
-    expect(service.keyFor(session, 'book_appointment')).toBe(
-      `${session.idempotencyNonce}:3:book_appointment`
+    expect(service.keyFor(session, 'book_appointment', INPUT)).toBe(
+      `${session.idempotencyNonce}:3:book_appointment:${hashOf(INPUT)}`
+    );
+  });
+
+  /**
+   * The property the input hash exists for. A single assistant turn can emit
+   * two `book_appointment` blocks — "Tuesday and Thursday" — at the same
+   * turnIndex, with the same tool name and the same session. Without the input
+   * in the key those two are one key, the second joins the first's cache entry,
+   * and one appointment is narrated as two.
+   */
+  it('gives two different inputs to the same tool in the same turn different keys', () => {
+    const session = createVerifiedSession('s1', 'u1', 'p1');
+    session.turnIndex = 3;
+
+    const tuesday = { startTime: '2026-09-01T09:00:00.000Z' };
+    const thursday = { startTime: '2026-09-03T09:00:00.000Z' };
+
+    expect(service.keyFor(session, 'book_appointment', tuesday)).not.toBe(
+      service.keyFor(session, 'book_appointment', thursday)
+    );
+  });
+
+  /**
+   * The other half, which the fix above must not break: a pipeline retry
+   * replays byte-identical input, so it must still land on the same key.
+   */
+  it('gives an identical input the same key, so a retry still de-duplicates', () => {
+    const session = createVerifiedSession('s1', 'u1', 'p1');
+    session.turnIndex = 3;
+
+    expect(service.keyFor(session, 'book_appointment', { ...INPUT })).toBe(
+      service.keyFor(session, 'book_appointment', { ...INPUT })
     );
   });
 
@@ -29,7 +69,7 @@ describe('IdempotencyService', () => {
    */
   it('does not derive the key from the sessionId', () => {
     const session = createVerifiedSession('s1', 'u1', 'p1');
-    expect(service.keyFor(session, 'book_appointment')).not.toContain('s1');
+    expect(service.keyFor(session, 'book_appointment', INPUT)).not.toContain('s1');
   });
 
   it('runs the operation once and replays the result', async () => {
@@ -61,8 +101,8 @@ describe('IdempotencyService', () => {
 
   it('keys different tools in the same turn separately', async () => {
     const session = createVerifiedSession('s1', 'u1', 'p1');
-    expect(service.keyFor(session, 'book_appointment')).not.toBe(
-      service.keyFor(session, 'cancel_appointment')
+    expect(service.keyFor(session, 'book_appointment', INPUT)).not.toBe(
+      service.keyFor(session, 'cancel_appointment', INPUT)
     );
   });
 });
@@ -104,20 +144,23 @@ describe('IdempotencyService.keyFor — namespace isolation', () => {
     b.turnIndex = 2;
 
     expect(a.sessionId).toBe(b.sessionId);
-    expect(service.keyFor(a, 'book_appointment')).not.toBe(service.keyFor(b, 'book_appointment'));
+    expect(service.keyFor(a, 'book_appointment', INPUT)).not.toBe(
+      service.keyFor(b, 'book_appointment', INPUT)
+    );
   });
 
-  it('keeps the three components separable', () => {
+  it('keeps the four components separable', () => {
     const session = createVerifiedSession('s1', 'u1', 'p1');
     session.turnIndex = 2;
 
-    const parts = service.keyFor(session, 'cancel_appointment').split(':');
+    const parts = service.keyFor(session, 'cancel_appointment', INPUT).split(':');
 
-    expect(parts).toHaveLength(3);
+    expect(parts).toHaveLength(4);
     expect(parts.map(decodeURIComponent)).toEqual([
       session.idempotencyNonce,
       '2',
       'cancel_appointment',
+      hashOf(INPUT),
     ]);
   });
 
@@ -138,7 +181,9 @@ describe('IdempotencyService.keyFor — namespace isolation', () => {
     // Naive concatenation flattens these two distinct triples onto one string.
     expect(naiveKey('n:9', 2, 'book_appointment')).toBe(naiveKey('n', '9:2', 'book_appointment'));
 
-    expect(service.keyFor(a, 'book_appointment')).not.toBe(service.keyFor(b, 'book_appointment'));
+    expect(service.keyFor(a, 'book_appointment', INPUT)).not.toBe(
+      service.keyFor(b, 'book_appointment', INPUT)
+    );
   });
 
   it('escapes percent signs too, so the escape itself is unambiguous', () => {
@@ -148,8 +193,8 @@ describe('IdempotencyService.keyFor — namespace isolation', () => {
     colon.idempotencyNonce = 'a:b';
 
     // Escaping that did not also escape '%' would map these onto the same key.
-    expect(service.keyFor(literal, 'book_appointment')).not.toBe(
-      service.keyFor(colon, 'book_appointment')
+    expect(service.keyFor(literal, 'book_appointment', INPUT)).not.toBe(
+      service.keyFor(colon, 'book_appointment', INPUT)
     );
   });
 
@@ -162,9 +207,9 @@ describe('IdempotencyService.keyFor — namespace isolation', () => {
     const bookedForA: VoiceToolResult = { status: 'confirmed', appointmentId: 'appt-for-a' };
     const bookedForB: VoiceToolResult = { status: 'confirmed', appointmentId: 'appt-for-b' };
 
-    await service.runOnce(service.keyFor(a, 'book_appointment'), async () => bookedForA);
+    await service.runOnce(service.keyFor(a, 'book_appointment', INPUT), async () => bookedForA);
     const forB = await service.runOnce(
-      service.keyFor(b, 'book_appointment'),
+      service.keyFor(b, 'book_appointment', INPUT),
       async () => bookedForB
     );
 

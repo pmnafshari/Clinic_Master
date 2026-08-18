@@ -528,7 +528,12 @@ describe('write tools — routed through ToolExecutorService', () => {
     expect(session.patientId).toBe('p-new');
   });
 
-  it('two overlapping bookings in the same turn create exactly one appointment', async () => {
+  it('two overlapping bookings of the SAME slot in one turn create exactly one appointment', async () => {
+    // This is the retry race, not two bookings: both calls carry a
+    // byte-identical BOOKING_INPUT, which is what a voice pipeline resends when
+    // the first attempt times out. De-duplicating it is the whole job of
+    // IdempotencyService, and the input hash in the key must not disturb it —
+    // identical input hashes identically, so both callers still share a key.
     const releases: Array<() => void> = [];
     appointments.create.mockImplementation(
       () =>
@@ -539,10 +544,19 @@ describe('write tools — routed through ToolExecutorService', () => {
 
     const session = createVerifiedSession('s-race', 'u1', 'patient-1');
 
-    const first = executor.execute('book_appointment', BOOKING_INPUT, session);
-    const second = executor.execute('book_appointment', BOOKING_INPUT, session);
+    let settled = 0;
+    const first = executor
+      .execute('book_appointment', BOOKING_INPUT, session)
+      .then((r) => ((settled += 1), r));
+    const second = executor
+      .execute('book_appointment', { ...BOOKING_INPUT }, session)
+      .then((r) => ((settled += 1), r));
 
+    // Both are in flight before either can return — without this the test would
+    // quietly become two sequential calls and prove nothing about the race.
     await Promise.resolve();
+    expect(settled).toBe(0);
+
     releases.forEach((release) => release());
     const [a, b] = await Promise.all([first, second]);
 
@@ -551,6 +565,42 @@ describe('write tools — routed through ToolExecutorService', () => {
     expect(appointments.create).toHaveBeenCalledTimes(1);
     expect(a.status).toBe('confirmed');
     expect(b.status).toBe('confirmed');
+    expect(a.appointmentId).toBe(b.appointmentId);
+  });
+
+  it('two DIFFERENT bookings in the same turn create two appointments', async () => {
+    // "Book me Tuesday and Thursday" is one assistant turn carrying two
+    // book_appointment blocks: same session, same turnIndex, same tool name,
+    // different input. Keyed without the input those two collapse onto one
+    // cache entry — the second caller is handed the FIRST appointment's id, one
+    // appointment exists, and the agent confirms two out loud.
+    const tuesday = {
+      startTime: '2026-09-01T09:00:00.000Z',
+      endTime: '2026-09-01T09:30:00.000Z',
+    };
+    const thursday = {
+      startTime: '2026-09-03T14:00:00.000Z',
+      endTime: '2026-09-03T14:30:00.000Z',
+    };
+
+    appointments.create.mockImplementation((args: { startTime: string }) =>
+      Promise.resolve({
+        id: args.startTime === tuesday.startTime ? 'a-tue' : 'a-thu',
+        startTime: args.startTime,
+      })
+    );
+
+    const session = createVerifiedSession('s-two-slots', 'u1', 'patient-1');
+
+    const a = await executor.execute('book_appointment', tuesday, session);
+    const b = await executor.execute('book_appointment', thursday, session);
+
+    expect(appointments.create).toHaveBeenCalledTimes(2);
+    expect(a.status).toBe('confirmed');
+    expect(b.status).toBe('confirmed');
+    expect(a.appointmentId).toBe('a-tue');
+    expect(b.appointmentId).toBe('a-thu');
+    expect(a.appointmentId).not.toBe(b.appointmentId);
   });
 
   it('a verified session can go straight to booking without intake', async () => {
