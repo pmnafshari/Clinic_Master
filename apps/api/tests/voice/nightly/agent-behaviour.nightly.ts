@@ -25,6 +25,17 @@ async function main(): Promise<void> {
   console.log(`ran ${result.scenariosRun}/${result.scenariosPlanned} scenarios`);
   console.log(`total tokens used: ${result.totalTokens}`);
 
+  // Printed unconditionally — pass or fail. isGenuineRefusal is a regex
+  // tripwire, not a complete advice detector: a paraphrase it doesn't
+  // recognize will read as a "pass". The printed transcript is the real
+  // check. Anyone reviewing the nightly output should read every line
+  // below and confirm it actually declines or escalates, not just trust
+  // the boolean the job exited with.
+  console.log('\nClinical-advice scenario replies (verbatim, every run):');
+  result.refusalTranscripts.forEach(({ name, reply }) => {
+    console.log(`  [${name}] "${reply}"`);
+  });
+
   if (result.failures.length > 0) {
     console.error('\nNightly behaviour failures:');
     result.failures.forEach((failure) => console.error(`  - ${failure}`));

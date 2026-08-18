@@ -5,7 +5,7 @@ import { ClinicInfoTool } from '../../../src/modules/voice/tools/clinic-info.too
 import { ServicePricingTool } from '../../../src/modules/voice/tools/service-pricing.tool';
 import { CheckAvailabilityTool } from '../../../src/modules/voice/tools/check-availability.tool';
 import { createAnonymousSession } from '../../../src/modules/voice/session/voice-session';
-import { UsageTrackingClient } from './usage-tracking-client';
+import { BudgetExceededError, UsageTrackingClient } from './usage-tracking-client';
 import {
   NightlyScenario,
   NIGHTLY_SCENARIOS,
@@ -14,11 +14,23 @@ import {
   validateScenarios,
 } from './scenarios';
 
+export interface RefusalTranscript {
+  name: string;
+  reply: string;
+}
+
 export interface NightlyRunResult {
   failures: string[];
   totalTokens: number;
   scenariosRun: number;
   scenariosPlanned: number;
+  /**
+   * The verbatim reply for every scenario that declares `expectRefusal`,
+   * captured whether that scenario passed or failed. No regex is a
+   * complete advice detector, so the printed transcript — not the boolean
+   * — is the real check a human reviewing the nightly output relies on.
+   */
+  refusalTranscripts: RefusalTranscript[];
 }
 
 /**
@@ -48,10 +60,13 @@ function buildToolWiring(): { registry: ToolRegistryService; executor: ToolExecu
  * `client` — no network call, no API key, no spend. The entrypoint is the
  * only place a real Anthropic client is constructed and passed in here.
  *
- * The budget is enforced *during* the run, checked after every scenario's
- * turn against the real accumulated `response.usage`, and the loop stops
- * the moment it is crossed — a run that goes over budget does not go on to
- * finish the scenario list first.
+ * The budget is enforced twice. Primarily inside UsageTrackingClient, which
+ * throws BudgetExceededError the instant a single API call's usage pushes
+ * the running total over budget — this fires mid-scenario, before a
+ * runaway tool loop can make its remaining calls (up to
+ * MAX_TOOL_ITERATIONS). Secondarily as a backstop check after each
+ * scenario's turn completes normally, kept in case the per-call enforcement
+ * is ever bypassed.
  */
 export async function runNightlyScenarios(
   client: AnthropicLike,
@@ -61,14 +76,29 @@ export async function runNightlyScenarios(
   validateScenarios(scenarios);
 
   const { registry, executor } = buildToolWiring();
-  const tracker = new UsageTrackingClient(client);
+  const tracker = new UsageTrackingClient(client, budget);
   const agent = new ClaudeAgentService(registry, executor, tracker);
   const failures: string[] = [];
+  const refusalTranscripts: RefusalTranscript[] = [];
   let scenariosRun = 0;
 
   for (const scenario of scenarios) {
     const session = createAnonymousSession(`nightly-${scenario.name}`);
-    const turn = await agent.respond(session, scenario.message, []);
+
+    let turn;
+    try {
+      turn = await agent.respond(session, scenario.message, []);
+    } catch (error) {
+      if (error instanceof BudgetExceededError) {
+        failures.push(
+          `token budget exceeded during "${scenario.name}": used ${error.totalTokens}, ` +
+            `budget is ${error.budget}`
+        );
+        break;
+      }
+      throw error;
+    }
+
     scenariosRun += 1;
 
     if (scenario.expectToolCall && !turn.toolCalls.includes(scenario.expectToolCall)) {
@@ -85,15 +115,21 @@ export async function runNightlyScenarios(
       failures.push(`${scenario.name}: reply did not match expected pattern — "${turn.reply}"`);
     }
 
-    if (scenario.expectRefusal && !isGenuineRefusal(turn.reply)) {
-      failures.push(
-        `${scenario.name}: reply does not read as a genuine refusal — "${turn.reply}"`
-      );
+    if (scenario.expectRefusal) {
+      // Printed on every run, pass or fail — see NightlyRunResult.refusalTranscripts.
+      refusalTranscripts.push({ name: scenario.name, reply: turn.reply });
+
+      if (!isGenuineRefusal(turn.reply)) {
+        failures.push(
+          `${scenario.name}: reply does not read as a genuine refusal — "${turn.reply}"`
+        );
+      }
     }
 
-    // Checked after every turn, not once at the end of the loop: a run that
-    // is already over budget must stop spending immediately, not finish the
-    // remaining scenarios first.
+    // Backstop: re-check after the scenario completes. In the normal case
+    // UsageTrackingClient will already have thrown before this is reached
+    // for any call that crosses budget; this only fires if that per-call
+    // enforcement is ever bypassed.
     if (tracker.usage.totalTokens > budget) {
       failures.push(
         `token budget exceeded after "${scenario.name}": used ${tracker.usage.totalTokens}, ` +
@@ -108,5 +144,6 @@ export async function runNightlyScenarios(
     totalTokens: tracker.usage.totalTokens,
     scenariosRun,
     scenariosPlanned: scenarios.length,
+    refusalTranscripts,
   };
 }
