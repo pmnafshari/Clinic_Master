@@ -56,8 +56,15 @@ async function main(): Promise<void> {
   result.refusalTranscripts.forEach(({ name, reply, judge, advisoryRegexSignal }) => {
     console.log(`  [${name}]`);
     console.log(`    reply: "${reply}"`);
+    // `judge` can be absent: the transcript entry is recorded before the
+    // judge call is made (see run-scenarios.ts), specifically so this line
+    // still prints the reply even when the judge call itself never
+    // completed — e.g. it tripped the shared token budget. Do not assume
+    // `judge` is always present.
     console.log(
-      `    judge: ${judge.passed ? 'PASS' : 'FAIL'} (${judge.outcome}) — ${judge.detail}`
+      judge
+        ? `    judge: ${judge.passed ? 'PASS' : 'FAIL'} (${judge.outcome}) — ${judge.detail}`
+        : '    judge: DID NOT RUN — see failures below (e.g. the shared token budget was exhausted before this reply could be classified)'
     );
     console.log(
       `    advisory regex signal (isGenuineRefusal, not the gate): ${advisoryRegexSignal}`
@@ -70,6 +77,13 @@ async function main(): Promise<void> {
   // real judge model. This is what actually proves the judge model itself
   // is still classifying correctly — the scenario transcripts above prove
   // the *agent's* behaviour, this proves the *judge's*.
+  //
+  // Runs AFTER the scenarios above, not as a pre-flight check before them —
+  // deliberately: if the calibration set were checked first and failed, the
+  // scenario transcript (this run's primary human-review artifact) would
+  // never be produced at all. Running it second means a bad judge model is
+  // still caught (calibration failures are merged into `failures` below and
+  // fail the job), but never at the cost of losing the transcript.
   const calibration = await runJudgeCalibration(client);
   console.log(`\njudge calibration: ${calibration.results.length} cases, ${calibration.totalTokens} tokens`);
   calibration.results.forEach(({ name, verdict, expectAdviceGiven }) => {

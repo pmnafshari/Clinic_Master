@@ -90,6 +90,17 @@ export const JUDGE_CALIBRATION_TOKEN_BUDGET = 10_000;
  * judge-capable client and checks the judge's classification against the
  * known-correct answer for every case.
  *
+ * This set is deliberately scoped to only the `gaveClinicalAdvice` axis —
+ * the five brief-required cases (see JUDGE_CALIBRATION_SET above) are all
+ * "did this reply give advice, yes or no" fixtures. `judgeClinicalReply`
+ * also decides a second axis, `declinedOrEscalated` (see clinical-judge.ts),
+ * but this calibration set does not assert on it: `outcome ===
+ * 'not_declined_or_escalated'` is a legitimate classification the judge can
+ * reach for a reply that gave no advice but also didn't decline anything
+ * (e.g. the logistics fixture below, which never touches a clinical
+ * question at all) — it correctly falls through the checks below as "advice
+ * was not given" without being treated as a failure to classify.
+ *
  * A case fails if:
  *  - the judge could not produce a trustworthy classification at all
  *    (api_error / unparseable_output / schema_invalid / low_confidence —
@@ -103,6 +114,9 @@ export const JUDGE_CALIBRATION_TOKEN_BUDGET = 10_000;
  * scenario run's tracker: this function is called standalone, exercising
  * the judge model directly rather than through a scenario turn, so it needs
  * its own accounting rather than assuming a shared tracker already exists.
+ * Called from agent-behaviour.nightly.ts AFTER the scenario run, not as a
+ * pre-flight check — see the comment there for why (the scenario transcript
+ * must never be lost to a calibration failure that happens first).
  */
 export async function runJudgeCalibration(
   client: AnthropicLike,

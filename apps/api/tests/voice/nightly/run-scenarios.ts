@@ -19,17 +19,26 @@ export interface RefusalTranscript {
   name: string;
   reply: string;
   /**
-   * The LLM judge's verdict on this reply — the actual pass/fail gate for
-   * `expectRefusal` scenarios. See clinical-judge.ts.
-   */
-  judge: JudgeVerdict;
-  /**
    * isGenuineRefusal's verdict on the same reply, kept only as a cheap
    * advisory signal printed alongside the judge's verdict and the
    * transcript. It is NOT the gate — see scenarios.ts for why the regex
    * approach was retired as a pass/fail mechanism.
    */
   advisoryRegexSignal: boolean;
+  /**
+   * The LLM judge's verdict on this reply — the actual pass/fail gate for
+   * `expectRefusal` scenarios. See clinical-judge.ts.
+   *
+   * Optional deliberately: this entry is recorded BEFORE the judge call is
+   * made (see the `expectRefusal` branch below), so that `name`, `reply`,
+   * and `advisoryRegexSignal` are captured and printed even if the judge
+   * call itself never completes — e.g. it trips the shared token budget.
+   * `judge` is attached once the call resolves. A transcript entry with no
+   * `judge` means the judge was never reached at all, which the human
+   * reviewing the printed transcript needs to see just as much as a normal
+   * fail-closed verdict.
+   */
+  judge?: JudgeVerdict;
 }
 
 export interface NightlyRunResult {
@@ -138,6 +147,20 @@ export async function runNightlyScenarios(
       // as a gate.
       const advisoryRegexSignal = isGenuineRefusal(turn.reply);
 
+      // Recorded BEFORE the judge call, deliberately: this is the actual
+      // human-review transcript (see NightlyRunResult.refusalTranscripts),
+      // and it must survive even if the judge call itself never completes —
+      // most importantly, a shared-budget trip below. `judge` is attached
+      // once the call resolves; a transcript entry with no `judge` means the
+      // reply exists but was never classified, which is exactly what a human
+      // reviewer needs to know.
+      const transcriptEntry: RefusalTranscript = {
+        name: scenario.name,
+        reply: turn.reply,
+        advisoryRegexSignal,
+      };
+      refusalTranscripts.push(transcriptEntry);
+
       // The actual gate: an LLM judge classifying the (userRequest,
       // agentReply) pair. `tracker` is the same UsageTrackingClient wrapping
       // the agent's own calls, so this call is priced against and enforced
@@ -160,14 +183,13 @@ export async function runNightlyScenarios(
         throw error;
       }
 
-      // Printed on every run, pass or fail — see NightlyRunResult.refusalTranscripts.
-      refusalTranscripts.push({ name: scenario.name, reply: turn.reply, judge, advisoryRegexSignal });
+      transcriptEntry.judge = judge;
 
       // FAIL CLOSED: judge.passed is false for every non-`no_advice`
-      // outcome — an actual advice classification, a judge error, an
-      // unparseable/schema-invalid response, or a low-confidence call all
-      // fail the scenario. An uncertain or broken judge is never treated as
-      // a safe reply.
+      // outcome — an actual advice classification, a non-refusal, a judge
+      // error, an unparseable/schema-invalid response, or a low-confidence
+      // call all fail the scenario. An uncertain or broken judge is never
+      // treated as a safe reply.
       if (!judge.passed) {
         failures.push(
           `${scenario.name}: LLM judge did not confirm a refusal (${judge.outcome}) — ` +
