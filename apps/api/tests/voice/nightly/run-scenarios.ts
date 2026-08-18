@@ -6,6 +6,7 @@ import { ServicePricingTool } from '../../../src/modules/voice/tools/service-pri
 import { CheckAvailabilityTool } from '../../../src/modules/voice/tools/check-availability.tool';
 import { createAnonymousSession } from '../../../src/modules/voice/session/voice-session';
 import { BudgetExceededError, UsageTrackingClient } from './usage-tracking-client';
+import { JudgeVerdict, judgeClinicalReply } from './clinical-judge';
 import {
   NightlyScenario,
   NIGHTLY_SCENARIOS,
@@ -17,6 +18,18 @@ import {
 export interface RefusalTranscript {
   name: string;
   reply: string;
+  /**
+   * The LLM judge's verdict on this reply — the actual pass/fail gate for
+   * `expectRefusal` scenarios. See clinical-judge.ts.
+   */
+  judge: JudgeVerdict;
+  /**
+   * isGenuineRefusal's verdict on the same reply, kept only as a cheap
+   * advisory signal printed alongside the judge's verdict and the
+   * transcript. It is NOT the gate — see scenarios.ts for why the regex
+   * approach was retired as a pass/fail mechanism.
+   */
+  advisoryRegexSignal: boolean;
 }
 
 export interface NightlyRunResult {
@@ -66,7 +79,10 @@ function buildToolWiring(): { registry: ToolRegistryService; executor: ToolExecu
  * runaway tool loop can make its remaining calls (up to
  * MAX_TOOL_ITERATIONS). Secondarily as a backstop check after each
  * scenario's turn completes normally, kept in case the per-call enforcement
- * is ever bypassed.
+ * is ever bypassed. The same `tracker` also wraps every call the LLM judge
+ * makes (see the `expectRefusal` branch below), so a judge call counts
+ * against this exact budget too — it is not a separate, unaccounted spend
+ * path.
  */
 export async function runNightlyScenarios(
   client: AnthropicLike,
@@ -116,12 +132,46 @@ export async function runNightlyScenarios(
     }
 
     if (scenario.expectRefusal) {
-      // Printed on every run, pass or fail — see NightlyRunResult.refusalTranscripts.
-      refusalTranscripts.push({ name: scenario.name, reply: turn.reply });
+      // isGenuineRefusal is kept only as a cheap, offline advisory signal —
+      // printed alongside the transcript below, never used to decide
+      // pass/fail. See scenarios.ts for why the regex approach was retired
+      // as a gate.
+      const advisoryRegexSignal = isGenuineRefusal(turn.reply);
 
-      if (!isGenuineRefusal(turn.reply)) {
+      // The actual gate: an LLM judge classifying the (userRequest,
+      // agentReply) pair. `tracker` is the same UsageTrackingClient wrapping
+      // the agent's own calls, so this call is priced against and enforced
+      // by the identical token budget (see the class doc on
+      // UsageTrackingClient and the doc on judgeClinicalReply).
+      let judge: JudgeVerdict;
+      try {
+        judge = await judgeClinicalReply(tracker, {
+          userRequest: scenario.message,
+          agentReply: turn.reply,
+        });
+      } catch (error) {
+        if (error instanceof BudgetExceededError) {
+          failures.push(
+            `token budget exceeded while judging "${scenario.name}": used ` +
+              `${error.totalTokens}, budget is ${error.budget}`
+          );
+          break;
+        }
+        throw error;
+      }
+
+      // Printed on every run, pass or fail — see NightlyRunResult.refusalTranscripts.
+      refusalTranscripts.push({ name: scenario.name, reply: turn.reply, judge, advisoryRegexSignal });
+
+      // FAIL CLOSED: judge.passed is false for every non-`no_advice`
+      // outcome — an actual advice classification, a judge error, an
+      // unparseable/schema-invalid response, or a low-confidence call all
+      // fail the scenario. An uncertain or broken judge is never treated as
+      // a safe reply.
+      if (!judge.passed) {
         failures.push(
-          `${scenario.name}: reply does not read as a genuine refusal — "${turn.reply}"`
+          `${scenario.name}: LLM judge did not confirm a refusal (${judge.outcome}) — ` +
+            `${judge.detail}`
         );
       }
     }
