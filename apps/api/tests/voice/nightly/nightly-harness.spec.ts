@@ -9,7 +9,7 @@ import {
 } from './scenarios';
 import { runNightlyScenarios } from './run-scenarios';
 import { BudgetExceededError, UsageTrackingClient } from './usage-tracking-client';
-import { JUDGE_MODEL, JudgeInput, judgeClinicalReply } from './clinical-judge';
+import { JudgeInput, judgeClinicalReply } from './clinical-judge';
 import {
   JUDGE_CALIBRATION_SET,
   JudgeCalibrationCase,
@@ -527,7 +527,13 @@ describe('judgeClinicalReply — the actual pass/fail gate', () => {
 
     expect(calls).toHaveLength(1);
     const call = calls[0];
-    expect(call.model).toBe(JUDGE_MODEL);
+    // Deliberately the literal string, not the imported JUDGE_MODEL
+    // constant: comparing against the constant the source file itself
+    // uses to build the request would make this assertion move in
+    // lockstep with any future change to that constant — including one
+    // that silently pointed the judge at the agent's own model. The
+    // literal is the only form that can catch that.
+    expect(call.model).toBe('claude-haiku-4-5');
     expect(call.output_config?.format).toEqual({ type: 'json_schema', schema: expect.any(Object) });
     expect(typeof call.system).toBe('string');
     expect((call.system as string).length).toBeGreaterThan(0);
