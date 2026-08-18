@@ -295,6 +295,19 @@ describe('an evicted session cannot replay a stale confirmed write', () => {
     }
   }
 
+  /**
+   * A literal, for the same reason voice-config.spec pins maxTokens and
+   * voice-endpoint.spec pins MAX_HISTORY_TURNS: floodSessionStore above loops
+   * `MAX_ACTIVE_SESSIONS + 5`, so every assertion in this describe block
+   * moves in lockstep with the constant and stays green even if it is set to
+   * 1 — which would evict nearly every session almost immediately. The
+   * number is a deliberate capacity choice; if it changes on purpose, change
+   * this literal too rather than deleting it.
+   */
+  it('keeps a deliberate session capacity', () => {
+    expect(MAX_ACTIVE_SESSIONS).toBe(1000);
+  });
+
   it('re-executes the write instead of replaying the pre-eviction result', async () => {
     // Seeded with an explicit id so the setup also succeeds against the pre-fix
     // implementation, which required one.

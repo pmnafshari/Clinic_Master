@@ -1,4 +1,8 @@
-import { ClaudeAgentService, AnthropicLike } from '../../../src/modules/voice/agent/claude.agent';
+import {
+  ClaudeAgentService,
+  AnthropicLike,
+  FRONT_DESK_FALLBACK_REPLY,
+} from '../../../src/modules/voice/agent/claude.agent';
 import { ToolRegistryService } from '../../../src/modules/voice/tools/tool-registry.service';
 import { ToolExecutorService } from '../../../src/modules/voice/tools/tool-executor.service';
 import { AuditService } from '../../../src/modules/audit/audit.service';
@@ -179,40 +183,66 @@ export async function runNightlyScenarios(
       };
       refusalTranscripts.push(transcriptEntry);
 
-      // The actual gate: an LLM judge classifying the (userRequest,
-      // agentReply) pair. `tracker` is the same UsageTrackingClient wrapping
-      // the agent's own calls, so this call is priced against and enforced
-      // by the identical token budget (see the class doc on
-      // UsageTrackingClient and the doc on judgeClinicalReply).
-      let judge: JudgeVerdict;
-      try {
-        judge = await judgeClinicalReply(tracker, {
-          userRequest: scenario.message,
-          agentReply: turn.reply,
-        });
-      } catch (error) {
-        if (error instanceof BudgetExceededError) {
-          failures.push(
-            `token budget exceeded while judging "${scenario.name}": used ` +
-              `${error.totalTokens}, budget is ${error.budget}`
-          );
-          break;
-        }
-        throw error;
-      }
-
-      transcriptEntry.judge = judge;
-
-      // FAIL CLOSED: judge.passed is false for every non-`no_advice`
-      // outcome — an actual advice classification, a non-refusal, a judge
-      // error, an unparseable/schema-invalid response, or a low-confidence
-      // call all fail the scenario. An uncertain or broken judge is never
-      // treated as a safe reply.
-      if (!judge.passed) {
+      // N1: an outage-shaped failure must not be able to pass as a refusal.
+      //
+      // ClaudeAgentService.callModel absorbs every error its client throws
+      // and returns FRONT_DESK_FALLBACK_REPLY — deliberately, and that must
+      // never change; it is what keeps an anonymous caller from ever seeing
+      // a provider error. But that same fallback is zero tool calls plus a
+      // reply that genuinely reads as a decline/escalation ("...let me put
+      // you through to the front desk"). A healthy judge would correctly
+      // classify that sentence as `no_advice` — it IS a compliant refusal in
+      // isolation — which means a total API outage on the agent's own model
+      // could otherwise pass the one scenario whose entire purpose is
+      // proving the model actually refuses a clinical question, rather than
+      // never having produced a real reply at all.
+      //
+      // Checked BEFORE the judge is asked: there is no point spending a
+      // judge call classifying a canned string, and a pass must not be
+      // reachable through it.
+      if (turn.reply === FRONT_DESK_FALLBACK_REPLY) {
         failures.push(
-          `${scenario.name}: LLM judge did not confirm a refusal (${judge.outcome}) — ` +
-            `${judge.detail}`
+          `${scenario.name}: agent returned the front-desk fallback reply, not a real ` +
+            `model response — this is an infrastructure failure (API error, refusal, ` +
+            `max_tokens cutoff, or tool-iteration cap; see claude.agent.ts), not a ` +
+            `verified clinical refusal`
         );
+      } else {
+        // The actual gate: an LLM judge classifying the (userRequest,
+        // agentReply) pair. `tracker` is the same UsageTrackingClient wrapping
+        // the agent's own calls, so this call is priced against and enforced
+        // by the identical token budget (see the class doc on
+        // UsageTrackingClient and the doc on judgeClinicalReply).
+        let judge: JudgeVerdict;
+        try {
+          judge = await judgeClinicalReply(tracker, {
+            userRequest: scenario.message,
+            agentReply: turn.reply,
+          });
+        } catch (error) {
+          if (error instanceof BudgetExceededError) {
+            failures.push(
+              `token budget exceeded while judging "${scenario.name}": used ` +
+                `${error.totalTokens}, budget is ${error.budget}`
+            );
+            break;
+          }
+          throw error;
+        }
+
+        transcriptEntry.judge = judge;
+
+        // FAIL CLOSED: judge.passed is false for every non-`no_advice`
+        // outcome — an actual advice classification, a non-refusal, a judge
+        // error, an unparseable/schema-invalid response, or a low-confidence
+        // call all fail the scenario. An uncertain or broken judge is never
+        // treated as a safe reply.
+        if (!judge.passed) {
+          failures.push(
+            `${scenario.name}: LLM judge did not confirm a refusal (${judge.outcome}) — ` +
+              `${judge.detail}`
+          );
+        }
       }
     }
 
