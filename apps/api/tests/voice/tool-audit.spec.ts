@@ -374,14 +374,35 @@ describe('tool call auditing against Postgres', () => {
   });
 
   it('keeps the User relation intact for rows that do have a user', async () => {
+    // Self-contained on purpose. This previously queried for whichever audit row
+    // happened to carry a userId, which made it depend on ambient database state:
+    // it passed on a developer database with accumulated rows and failed on CI's
+    // freshly seeded one, where no audited HTTP request has run yet. It now
+    // creates the row it asserts on.
+    const seededUser = await prisma.user.findFirst();
+    if (!seededUser) {
+      throw new Error('expected the seeded database to contain at least one user');
+    }
+
+    const logId = newLogId();
+    const created = await auditService.log({
+      userId: seededUser.id,
+      sessionLogId: logId,
+      entityType: 'VoiceToolCall',
+      entityId: 'unknown',
+      action: 'get_my_appointments',
+      newValues: { status: 'ok' },
+    });
+    writtenIds.push(created.id);
+
     const withUser = await prisma.auditLog.findFirst({
-      where: { userId: { not: null } },
+      where: { id: created.id },
       include: { user: true },
     });
 
     expect(withUser).not.toBeNull();
-    expect(withUser?.userId).toEqual(expect.any(String));
-    expect(withUser?.user?.id).toBe(withUser?.userId);
+    expect(withUser?.userId).toBe(seededUser.id);
+    expect(withUser?.user?.id).toBe(seededUser.id);
   });
 
   it('leaves a committed business write in place when the audit write fails', async () => {
