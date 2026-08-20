@@ -852,6 +852,7 @@ git commit -m "fix(voice): rotate the session id when a patient is bound"
 
 **Files:**
 - Create: `apps/api/src/modules/voice/transport/audio-transport.interface.ts`
+- Create: `apps/api/src/modules/voice/speech/text-to-speech.interface.ts`
 - Create: `apps/api/src/modules/voice/transport/error-codes.ts`
 - Create: `apps/api/src/modules/voice/transport/frames.ts`
 - Create: `apps/api/src/modules/voice/transport/voice-turn-runner.ts`
@@ -871,6 +872,7 @@ git commit -m "fix(voice): rotate the session id when a patient is bound"
   - `interface AudioTransport { send(frame: ServerFrame): void; close(code: VoiceErrorCode): void; onTeardown(fn: () => void | Promise<void>): void }`
   - `class VoiceTurnRunner` with `runTurn(transport: AudioTransport, conversation: Conversation, text: string): Promise<void>` — **the only place a turn is dispatched**
   - `class VoiceGateway`
+  - `interface TextToSpeech { synthesise(text: string): AsyncIterable<Buffer>; cancel(): void }` and the `TEXT_TO_SPEECH` DI token — **the seam only**. T4 speaks its confidence re-prompt through this with a fake; T5 supplies the ElevenLabs implementation behind it.
 
 - [ ] **Step 1: Install the WebSocket packages**
 
@@ -1272,6 +1274,52 @@ export interface AudioTransport {
   onTeardown(fn: () => void | Promise<void>): void;
 }
 ```
+
+- [ ] **Step 8b: Declare the `TextToSpeech` seam — interface only**
+
+This is a **declaration, not an implementation**. Nothing here synthesises audio, chunks a sentence,
+retries, or cancels: all of that is T5's. The seam lives at T2 because T4's confidence gate (§3 of
+the spec) must speak a re-prompt while depending only on T2 — putting the interface in T5 would
+force T4 to depend on T5 and serialise two deliberately parallel tasks.
+
+Create `apps/api/src/modules/voice/speech/text-to-speech.interface.ts`:
+
+```ts
+/** DI token so a fake can be substituted without touching the gateway. */
+export const TEXT_TO_SPEECH = Symbol('TEXT_TO_SPEECH');
+
+/**
+ * The seam between a reply and whatever speaks it.
+ *
+ * `cancel()` is implemented and used in Phase 1 — for teardown only: clean
+ * disconnect, dropped connection, connection-duration cap, session expiry. It
+ * is NOT wired to barge-in detection; nothing in Phase 1 listens for caller
+ * speech during playback. Barge-in is Phase 2 and reuses this contract
+ * unchanged.
+ *
+ * Declared here alongside AudioTransport. The ElevenLabs implementation behind
+ * it belongs entirely to T5.
+ */
+export interface TextToSpeech {
+  synthesise(text: string): AsyncIterable<Buffer>;
+  cancel(): void;
+}
+```
+
+Inject it **optionally** wherever the gateway speaks:
+
+```ts
+    @Optional() @Inject(TEXT_TO_SPEECH) private readonly tts?: TextToSpeech
+```
+
+T4 and T5 are parallel siblings off T2, so either may land first. Nothing binds `TEXT_TO_SPEECH`
+until T5, and a required injection would leave the app unable to boot in the window between them.
+Optional injection also needs no new behaviour: when no implementation is bound, the reply is
+delivered as text on the socket with `tts_unavailable` — exactly the fallback §6 already specifies
+for a failing provider.
+
+Do **not** create `elevenlabs-tts.service.ts` or `sentence-chunker.ts` in this task. If you find
+yourself writing synthesis logic here, stop — that is T5's scope.
 
 - [ ] **Step 9: Implement the single turn-dispatch path**
 
@@ -2012,7 +2060,7 @@ git commit -m "feat(voice): add websocket origin, rate and lifetime controls"
 - Test: `apps/api/tests/voice/stt-confidence.spec.ts` (create)
 
 **Interfaces:**
-- Consumes: `VoiceTurnRunner.runTurn` (T2) — T4 calls it; it does **not** add a second dispatch path.
+- Consumes: `VoiceTurnRunner.runTurn` (T2) — T4 calls it; it does **not** add a second dispatch path. `TextToSpeech` + `TEXT_TO_SPEECH` (T2), used through a fake to speak the re-prompt — T4 never constructs a provider client.
 - Produces: `interface SpeechToText { start(session): Promise<void>; write(chunk: Buffer): void; end(): Promise<void>; onPartial(handler): void; onFinal(handler): void }`, `SPEECH_TO_TEXT` DI token, `STT_MIN_CONFIDENCE`, `LOW_CONFIDENCE_REPROMPT`.
 
 - [ ] **Step 1: Write the failing confidence-gate test**
@@ -2080,32 +2128,9 @@ describe('STT confidence gate', () => {
 });
 ```
 
-> ### ⛔ BLOCKED — ruling required before this task runs
->
-> **The confidence gate needs to speak, but T4 depends only on T2.** The
-> re-prompt in `handleFinal` below calls `this.speak(...)`, which needs
-> `TextToSpeech` — and the spec assigns that interface to **T5**, which T4 does
-> not depend on. T4 cannot both "ask the caller to repeat" and depend only on
-> T2 as written.
->
-> This is a spec-level dependency question, not an implementation detail, so it
-> is **not** improvised here. Three resolutions, all of which change approved
-> scope or dependencies:
->
-> 1. Move the `TextToSpeech` **interface and DI token only** (not the
->    ElevenLabs implementation) from T5 into T2. Smallest change; T2 already
->    owns the transport seam, and T5 keeps the whole provider integration.
-> 2. Add T5 to T4's dependencies. Simple, but serialises two tasks that were
->    deliberately parallel siblings off T2.
-> 3. Have T4 emit the re-prompt as a server frame and let T5 speak it once TTS
->    exists. Keeps dependencies untouched, but the caller hears nothing until
->    T5 lands, so T4's acceptance criterion is not met at T4.
->
-> **Recommended: option 1.** It preserves the approved dependency graph, keeps
-> T4 and T5 parallel, and moves an interface — not behaviour.
->
-> Everything else in T4 is unaffected: the zero-agent-invocation property is
-> fully testable against a `TextToSpeech` fake under any of the three.
+> **Dependency note.** The confidence gate speaks its re-prompt through the `TextToSpeech`
+> interface **declared in T2**, driven by a fake in these tests. T4 depends on T2 only and never
+> reaches a provider; the real ElevenLabs implementation is T5's and is not needed here.
 
 - [ ] **Step 2: Run, fail, implement the interface and the gate**
 
@@ -2206,7 +2231,6 @@ git commit -m "feat(voice): stream speech to text with a confidence gate"
 **Dependencies:** T2.
 
 **Files:**
-- Create: `apps/api/src/modules/voice/speech/text-to-speech.interface.ts`
 - Create: `apps/api/src/modules/voice/speech/sentence-chunker.ts`
 - Create: `apps/api/src/modules/voice/speech/elevenlabs-tts.service.ts`
 - Modify: `apps/api/src/modules/voice/transport/voice.gateway.ts`
@@ -2215,8 +2239,8 @@ git commit -m "feat(voice): stream speech to text with a confidence gate"
 - Test: `apps/api/tests/voice/tts-streaming.spec.ts` (create)
 
 **Interfaces:**
-- Consumes: `AudioTransport.onTeardown` (T2) — T5 registers into the existing registry; it does not create a second teardown path.
-- Produces: `chunkSentences(text: string): string[]`, `interface TextToSpeech { synthesise(text): AsyncIterable<Buffer>; cancel(): void }`, `TEXT_TO_SPEECH` token, `MIN_CHUNK_LENGTH`.
+- Consumes: `AudioTransport.onTeardown` (T2) — T5 registers into the existing registry; it does not create a second teardown path. `TextToSpeech` + `TEXT_TO_SPEECH` (T2) — T5 **implements** the interface T2 declared and must not redefine or widen it.
+- Produces: `chunkSentences(text: string): string[]`, `MIN_CHUNK_LENGTH`, `class ElevenLabsTtsService implements TextToSpeech` bound to the `TEXT_TO_SPEECH` token in `voice.module.ts`.
 
 - [ ] **Step 1: Write the failing chunker test**
 
@@ -3041,5 +3065,5 @@ If any task appears to require one of these, **stop and report**. Each is delibe
 ## Self-review notes
 
 - **Spec coverage:** every spec section maps to a task — §2.2→T1a/T1b, §2.3→T8, §2.4→T3, §2.6→T2, §2.7→T2, §2.8→T7, §2.9→T10 (docs only), §2.10→T3, §3→T4, §4→T5, §5→deferred by design, §6→T2/T3, §7→T3, §8→T4/T5, §9→T9, §11→T10, §13→all.
-- **Type consistency:** `runTurn(transport, conversation, text)` is defined in T2 and called unchanged in T1b and T4. `onTeardown(fn)` is defined in T2 and consumed in T3 and T5. `VoiceErrorCode` is defined in T2 and consumed in T3, T5, T7.
+- **Type consistency:** `runTurn(transport, conversation, text)` is defined in T2 and called unchanged in T1b and T4. `onTeardown(fn)` is defined in T2 and consumed in T3 and T5. `VoiceErrorCode` is defined in T2 and consumed in T3, T5, T7. `TextToSpeech` and `TEXT_TO_SPEECH` are declared in T2, consumed through a fake in T4, and implemented by `ElevenLabsTtsService` in T5 — one declaration, two consumers, no redefinition.
 - **Phase 0 guarantee:** `claude.agent.ts`, `tool-executor.service.ts`, `tool-registry.service.ts`, `idempotency.service.ts` and every `*.tool.ts` appear in **no task's modify list**. T4 Step 4 makes that a hard, checkable gate.

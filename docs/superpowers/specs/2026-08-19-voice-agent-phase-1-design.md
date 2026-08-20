@@ -313,6 +313,13 @@ fragment speech, and a flush at end-of-stream.
 Audio frames are forwarded to the transport as they arrive. `TextToSpeech` interface:
 `synthesise(text) → AsyncIterable<AudioFrame>`, plus `cancel()`.
 
+**The interface and its DI token are declared in T2, alongside `AudioTransport`; the ElevenLabs
+implementation behind them is entirely T5's.** They are split because the STT confidence gate (§3)
+has to speak a re-prompt, and T4 depends only on T2 — without the interface at the seam, T4 would
+have to depend on T5 and two deliberately parallel tasks would serialise. T4 consumes the interface
+through a fake and never touches a provider. Declaring a seam is not implementing what sits behind
+it: no synthesis, no chunking, no provider call and no `cancel()` behaviour moves out of T5.
+
 **`cancel()` is implemented and used in Phase 1** — for teardown only. It is called on clean
 disconnect, on a dropped connection, on connection-duration cap, and on session expiry, to stop
 in-flight synthesis and avoid orphaned provider streams (§2.4, §6). It is **not** wired to barge-in
@@ -525,6 +532,10 @@ directly. Raw `ws` also keeps binary PCM framing simple and needs **no client li
 bundle** — the native `WebSocket` API is enough.
 Includes the frame schemas of §2.7, per-frame validation, and the `turn.text` control frame that
 drives a complete agent turn with no speech provider involved.
+Also declares the **`TextToSpeech` interface and its `TEXT_TO_SPEECH` DI token** next to
+`AudioTransport` — **the interface only**. No synthesis, no sentence chunking, no provider client and
+no `cancel()` implementation: all of that stays in T5. The seam sits here so T4's confidence gate can
+speak through a fake without depending on T5 (§4).
 Accept: static import-graph test — gateway imports neither `ToolRegistryService` nor any `*.tool.ts`
 — **with a mutation check**; unknown frame type rejected; unknown field rejected; a frame carrying
 `patientId`/`userId`/`identityVerified` rejected **and session state provably unchanged**; a full
@@ -549,7 +560,9 @@ rejected with `session_conflict` **and the first socket keeps working**; the new
 pinned to literals and are demonstrably distinct from `MAX_HISTORY_TURNS` and the HTTP throttle.
 
 **T4 — STT integration behind `SpeechToText`**
-Deps: T2.
+Deps: T2. *(Unchanged. The confidence gate speaks its re-prompt through the `TextToSpeech`
+interface declared in T2, driven by a fake in tests — T4 never reaches a real provider and never
+depends on T5.)*
 Deepgram streaming, `linear16`/16 kHz, interim results, `speech_final` dispatch, confidence gate.
 Accept: full turn driven by a fake STT with no network; **below-threshold final produces the fixed
 transport-level re-prompt with `agent.respond` invoked exactly 0 times**, and `ClaudeAgentService`
@@ -557,7 +570,9 @@ is byte-for-byte unmodified; no credential in any log.
 
 **T5 — TTS integration behind `TextToSpeech`**
 Deps: T2.
-ElevenLabs streaming, sentence chunker, `cancel()` implemented for teardown.
+ElevenLabs streaming, sentence chunker, `cancel()` implemented for teardown. T5 owns **everything
+behind** the interface T2 declared: the provider client, the chunker, retry and text fallback, and
+the `cancel()` behaviour. It implements the interface; it does not redefine it.
 Accept: first frame emitted before the full reply is generated; chunker unit-tested including
 abbreviations and end-flush; text fallback when TTS fails; **teardown tests** — disconnect
 mid-synthesis calls `cancel()` exactly once and emits no further audio frames; no barge-in detection
@@ -649,6 +664,12 @@ Folded in from the pre-implementation review against the merged Phase 0 codebase
 | 15 | Single-process constraint made concrete via `APP_INSTANCES` | §11, §13 T10 |
 | 16 | WS turn limits given their own named constants, distinguished from `MAX_HISTORY_TURNS` and the HTTP throttle | §7, §13 T3 |
 | 17 | T6 now depends on T7 | §13 |
+
+**Amendment, 2026-08-20 (post-plan review).** Writing the implementation plan surfaced a
+contradiction: T4's confidence gate must speak a re-prompt, but `TextToSpeech` sat in T5 while T4
+depends only on T2. Resolved by moving the **interface and DI token only** into T2 and leaving the
+ElevenLabs implementation wholly in T5. The dependency graph is unchanged — T4 still depends on T2
+alone, and T4/T5 remain parallel siblings. No task was added, removed, merged, split or reordered.
 
 Also corrected: §2.6 previously claimed to mirror "the Phase 0 test that pins `ToolExecutorService`
 as the only dispatch site". **No such test exists** — Phase 0 pins the executor's behaviour, not the
