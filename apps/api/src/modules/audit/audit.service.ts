@@ -5,8 +5,19 @@ import { PrismaService } from '../../prisma/prisma.service';
 export class AuditService {
   constructor(private prisma: PrismaService) {}
 
+  /**
+   * `userId` is optional because a voice tool call has to be auditable before
+   * the caller has been identified — an anonymous session has no user.
+   *
+   * `sessionLogId` carries `VoiceSession.logId`, the non-secret per-conversation
+   * correlation id, and correlates every tool call made in one conversation.
+   * It is never the sessionId: that is a bearer credential, and persisting it
+   * would leave live credentials at rest in a table any DB read, backup, or ops
+   * query can reach.
+   */
   async log(data: {
-    userId: string;
+    userId?: string | null;
+    sessionLogId?: string | null;
     entityType: string;
     entityId?: string;
     action: string;
@@ -16,7 +27,8 @@ export class AuditService {
   }) {
     return this.prisma.auditLog.create({
       data: {
-        userId: data.userId,
+        userId: data.userId ?? null,
+        sessionLogId: data.sessionLogId ?? null,
         entityType: data.entityType,
         entityId: data.entityId || 'unknown',
         action: data.action,

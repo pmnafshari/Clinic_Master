@@ -1,0 +1,40 @@
+name: Nightly agent behaviour
+
+# Model-behaviour drift check. Runs the real Anthropic API against a fixed,
+# reviewed scenario list (apps/api/tests/voice/nightly/scenarios.ts) —
+# including the only place in this project that verifies clinical-advice
+# refusal against a real model rather than a scripted one.
+#
+# schedule + workflow_dispatch only. This must never gain a push or
+# pull_request trigger: every run here is real spend against the Anthropic
+# API, and PR volume must not multiply it. STT/TTS/telephony are never
+# called — this is the text-only Phase 0 endpoint — so this job can only
+# ever bill Anthropic for chat completions.
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+# Never let two nightly runs overlap and double-spend.
+concurrency:
+  group: nightly-agent-evals
+  cancel-in-progress: false
+
+jobs:
+  behaviour:
+    name: Agent behaviour
+    runs-on: ubuntu-latest
+    # Wall-clock cap: a hung run cannot bill indefinitely.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+      - run: npm ci
+      - run: npx prisma generate --schema apps/api/prisma/schema.prisma
+      - run: npm run test:nightly --workspace=@smileflow/api
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          VOICE_AGENT_ENABLED: 'true'

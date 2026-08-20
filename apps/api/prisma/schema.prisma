@@ -262,18 +262,25 @@ model Notification {
 }
 
 model AuditLog {
-  id         String   @id @default(uuid())
-  userId     String
-  user       User     @relation(fields: [userId], references: [id])
-  entityType String
-  entityId   String
-  action     String
-  oldValues  Json?
-  newValues  Json?
-  ipAddress  String?
-  createdAt  DateTime @default(now())
+  id     String  @id @default(uuid())
+  /// Null for an anonymous voice session: a tool call must be auditable
+  /// before the caller has been identified.
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id])
+  /// The conversation's non-secret correlation id (`VoiceSession.logId`).
+  /// Never the sessionId — that is a bearer credential and must not be
+  /// persisted anywhere a DB read, backup, or ops query can reach it.
+  sessionLogId String?
+  entityType   String
+  entityId     String
+  action       String
+  oldValues    Json?
+  newValues    Json?
+  ipAddress    String?
+  createdAt    DateTime @default(now())
 
   @@index([userId])
+  @@index([sessionLogId])
   @@index([entityType, entityId])
   @@index([createdAt])
 }
