@@ -872,6 +872,7 @@ git commit -m "fix(voice): rotate the session id when a patient is bound"
   - `interface AudioTransport { send(frame: ServerFrame): void; close(code: VoiceErrorCode): void; onTeardown(fn: () => void | Promise<void>): void }`
   - `class VoiceTurnRunner` with `runTurn(transport: AudioTransport, conversation: Conversation, text: string): Promise<void>` — **the only place a turn is dispatched**
   - `class VoiceGateway`
+  - `deliverReply(transport: AudioTransport, text: string): Promise<'audio' | 'text'>` — **the single delivery path**. Speaks when a provider is bound and working, sends `reply.text` + `tts_unavailable` otherwise. The return value is what makes "no audio was produced" assertable instead of inferable.
   - `interface TextToSpeech { synthesise(text: string): AsyncIterable<Buffer>; cancel(): void }` and the `TEXT_TO_SPEECH` DI token — **the seam only**. T4 speaks its confidence re-prompt through this with a fake; T5 supplies the ElevenLabs implementation behind it.
 
 - [ ] **Step 1: Install the WebSocket packages**
@@ -1015,6 +1016,10 @@ export type ServerFrame =
   | { type: 'session.rotated'; sessionId: string }
   | { type: 'stt.partial'; text: string }
   | { type: 'agent.thinking' }
+  // The delivery half of the TTS fallback: the failure table in the design doc
+  // promised the reply as text on the socket, but no frame could carry it.
+  // Emitted only when synthesis did not happen — never alongside audio.
+  | { type: 'reply.text'; text: string }
   | { type: 'turn.complete' }
   | { type: 'error'; code: VoiceErrorCode };
 
@@ -1321,6 +1326,145 @@ for a failing provider.
 Do **not** create `elevenlabs-tts.service.ts` or `sentence-chunker.ts` in this task. If you find
 yourself writing synthesis logic here, stop — that is T5's scope.
 
+- [ ] **Step 8c: Write the failing "no TTS bound" tests**
+
+Optional injection must not become a silent production failure. These tests make the unbound state
+a documented, observable outcome. Add to `apps/api/tests/voice/voice-gateway.spec.ts`:
+
+```ts
+describe('delivering a reply with no TTS provider bound', () => {
+  // Requirement 1: the module boots at all without TEXT_TO_SPEECH.
+  it('boots and resolves the gateway with no TEXT_TO_SPEECH provider', async () => {
+    const { gateway } = await buildGateway(); // binds no TEXT_TO_SPEECH
+    expect(gateway).toBeDefined();
+  });
+
+  // Requirements 2 and 3: the fallback is the documented one, and it is visible.
+  it('sends the reply as text and reports tts_unavailable', async () => {
+    const { gateway } = await buildGateway();
+    const transport = new FakeTransport();
+    await gateway.handleFrame(transport, { type: 'session.start' });
+
+    await gateway.handleFrame(transport, { type: 'turn.text', text: 'what are your hours?' });
+
+    expect(transport.typesSent()).toEqual([
+      'session.ready',
+      'agent.thinking',
+      'reply.text',
+      'error',
+      'turn.complete',
+    ]);
+    expect(transport.sent).toContainEqual({ type: 'error', code: 'tts_unavailable' });
+    const reply = transport.sent.find((f) => f.type === 'reply.text');
+    expect(reply).toEqual({ type: 'reply.text', text: 'We are open eight to six.' });
+  });
+
+  // Requirement 3 again, from the other side: nothing may imply audio happened.
+  it('does not pretend audio was generated', async () => {
+    const { gateway } = await buildGateway();
+    const transport = new FakeTransport();
+    await gateway.handleFrame(transport, { type: 'session.start' });
+
+    await gateway.handleFrame(transport, { type: 'turn.text', text: 'hours?' });
+
+    expect(transport.audioFrames).toHaveLength(0);
+    expect(transport.typesSent()).not.toContain('audio.frame');
+  });
+
+  // Requirement 5: absence is never success. This is the assertion that makes
+  // the difference between a fallback and a silent failure.
+  it('never reports a missing provider as a successful synthesis', async () => {
+    const { gateway } = await buildGateway();
+    const transport = new FakeTransport();
+    await gateway.handleFrame(transport, { type: 'session.start' });
+
+    const mode = await gateway.deliverReply(transport, 'We are open eight to six.');
+
+    expect(mode).toBe('text');
+    expect(mode).not.toBe('audio');
+  });
+
+  // Requirement 6: one mechanism, not two. A second fallback added anywhere in
+  // src/ turns this red.
+  it('has exactly one place that emits tts_unavailable', () => {
+    const root = join(__dirname, '../../src');
+    const files = execSync(`grep -rl "tts_unavailable" ${root} || true`)
+      .toString()
+      .trim()
+      .split('\n')
+      .filter(Boolean);
+
+    // error-codes.ts declares the code; deliverReply is the only emitter.
+    expect(files.map((f) => f.split('/').pop()).sort()).toEqual([
+      'error-codes.ts',
+      'voice.gateway.ts',
+    ]);
+
+    const gateway = readFileSync(join(root, 'modules/voice/transport/voice.gateway.ts'), 'utf8');
+    expect(gateway.match(/'tts_unavailable'/g) ?? []).toHaveLength(1);
+  });
+});
+```
+
+- [ ] **Step 8d: Run and watch them fail**
+
+Run: `npm run test --workspace=@smileflow/api -- voice-gateway`
+Expected: FAIL — `deliverReply` does not exist.
+
+- [ ] **Step 8e: Implement the single delivery path**
+
+In `voice.gateway.ts`. This is the **only** place a reply is delivered and the **only** place
+`tts_unavailable` is emitted — a provider that throws and a provider that was never bound take the
+same branch, deliberately, so the two cannot drift apart:
+
+```ts
+  /**
+   * Delivers one reply and reports how.
+   *
+   * Returns 'audio' only when synthesis actually produced frames. A missing
+   * provider, a provider that throws, and a provider that yields nothing all
+   * return 'text' — absence is never reported as success, which is what stops
+   * optional injection becoming a silent failure path in production.
+   *
+   * T5 binds a real implementation to TEXT_TO_SPEECH. That changes which
+   * implementation runs here; it does not add a second path.
+   */
+  async deliverReply(transport: AudioTransport, text: string): Promise<'audio' | 'text'> {
+    if (this.tts) {
+      try {
+        let frames = 0;
+        for await (const chunk of this.tts.synthesise(text)) {
+          transport.sendAudio?.(chunk);
+          frames += 1;
+        }
+        if (frames > 0) {
+          return 'audio';
+        }
+      } catch (error) {
+        // Provider detail is logged server-side by T7's mapper, never sent.
+        this.logger.warn(`Speech synthesis failed, delivering as text`);
+      }
+    }
+
+    transport.send({ type: 'reply.text', text });
+    transport.send({ type: 'error', code: 'tts_unavailable' });
+    return 'text';
+  }
+```
+
+- [ ] **Step 8f: Run and watch them pass**
+
+Run: `npm run test --workspace=@smileflow/api -- voice-gateway`
+Expected: PASS, 9 tests.
+
+- [ ] **Step 8g: Mutation checks — both mandatory**
+
+1. Change the final `return 'text'` to `return 'audio'`. Expected: the "never reports a missing
+   provider as a successful synthesis" test goes red. **Restore.** This is the single most
+   important mutation in the task — it is the difference between a fallback and a lie.
+2. Add a second `transport.send({ type: 'error', code: 'tts_unavailable' })` anywhere else in the
+   gateway. Expected: the "exactly one place" test goes red. **Restore.**
+
 - [ ] **Step 9: Implement the single turn-dispatch path**
 
 Create `apps/api/src/modules/voice/transport/voice-turn-runner.ts`:
@@ -1553,14 +1697,19 @@ git commit -m "feat(voice): add the websocket transport seam and frame protocol"
 - Unknown id starts fresh and does not close the connection.
 - Unknown frame type, unknown field, and every identity-bearing field are rejected with `bad_frame`, and session state is provably unchanged (same object identity, `patientId` still null).
 - Static import test proves the transport imports no registry and no tool, **with a passing mutation check**.
+- **Boots with no `TEXT_TO_SPEECH` bound.** In that state `deliverReply` returns `'text'`, emits `reply.text` then `tts_unavailable`, emits **zero** audio frames, and never returns `'audio'`.
+- Exactly one `tts_unavailable` emission site in `src/`, pinned by a source scan.
 
 **Security checks:**
 - Gateway holds only `VoiceSessionStore` and `VoiceTurnRunner`.
 - No client-supplied field other than `sessionId` influences anything, and `sessionId` can only *select* a session, never create one with a chosen id.
 - No `sessionId` in any log line — `VoiceTurnRunner` logs `logId` only.
 - `ClaudeAgentService` unmodified.
+- A missing TTS provider degrades **visibly** — it is never silently treated as a delivered reply.
 
 **Mutation/negative tests:**
+- `return 'text'` → `return 'audio'` on the fallback → success-misreporting test red (Step 8g.1, mandatory).
+- A second `tts_unavailable` emission added → single-site test red (Step 8g.2, mandatory).
 - Registry import added to the gateway → isolation test red (Step 14, mandatory).
 - Remove the `FORBIDDEN_KEYS` check → the ten identity-field cases go red.
 - Make `resume()` adopt an unknown candidate id verbatim → "starts a fresh session" goes red.
@@ -2239,7 +2388,7 @@ git commit -m "feat(voice): stream speech to text with a confidence gate"
 - Test: `apps/api/tests/voice/tts-streaming.spec.ts` (create)
 
 **Interfaces:**
-- Consumes: `AudioTransport.onTeardown` (T2) — T5 registers into the existing registry; it does not create a second teardown path. `TextToSpeech` + `TEXT_TO_SPEECH` (T2) — T5 **implements** the interface T2 declared and must not redefine or widen it.
+- Consumes: `AudioTransport.onTeardown` (T2) — T5 registers into the existing registry; it does not create a second teardown path. `deliverReply` (T2) — T5 binds an implementation behind it and **must not** add a second delivery path, a second fallback, or a second `tts_unavailable` emission; T2's single-site test enforces that. `TextToSpeech` + `TEXT_TO_SPEECH` (T2) — T5 **implements** the interface T2 declared and must not redefine or widen it.
 - Produces: `chunkSentences(text: string): string[]`, `MIN_CHUNK_LENGTH`, `class ElevenLabsTtsService implements TextToSpeech` bound to the `TEXT_TO_SPEECH` token in `voice.module.ts`.
 
 - [ ] **Step 1: Write the failing chunker test**
@@ -2388,6 +2537,34 @@ describe('TTS streaming and teardown', () => {
     expect(transport.audioFrames.length).toBe(framesAtTeardown);
   });
 
+  // Requirement 4: binding a provider changes which implementation runs,
+  // not which path runs. Same deliverReply, different outcome.
+  it('uses the bound implementation through the same delivery path', async () => {
+    const { gateway, tts } = await buildGatewayWithFakeTts();
+    const transport = new FakeTransport();
+    await gateway.handleFrame(transport, { type: 'session.start' });
+
+    const mode = await gateway.deliverReply(transport, 'We are open eight to six.');
+
+    expect(mode).toBe('audio');
+    expect(tts.synthesiseCalls.length).toBeGreaterThan(0);
+    expect(transport.audioFrames.length).toBeGreaterThan(0);
+    expect(transport.sent).not.toContainEqual({ type: 'error', code: 'tts_unavailable' });
+    expect(transport.typesSent()).not.toContain('reply.text');
+  });
+
+  it('falls back through the same path when the bound provider yields nothing', async () => {
+    const { gateway } = await buildGatewayWithFakeTts({ yieldNothing: true });
+    const transport = new FakeTransport();
+    await gateway.handleFrame(transport, { type: 'session.start' });
+
+    const mode = await gateway.deliverReply(transport, 'We are open eight to six.');
+
+    // A provider that produces no audio is not a success either.
+    expect(mode).toBe('text');
+    expect(transport.sent).toContainEqual({ type: 'error', code: 'tts_unavailable' });
+  });
+
   it('has no barge-in detection: caller audio during playback does not cancel', async () => {
     const { gateway, tts } = await buildGatewayWithFakeTts({ slow: true });
     const transport = new FakeTransport();
@@ -2422,7 +2599,7 @@ git add apps/api
 git commit -m "feat(voice): stream text to speech with sentence chunking"
 ```
 
-**Acceptance criteria:** First frame before full generation; chunker handles abbreviations, terminators, end-flush, empty input; text fallback on repeat failure; `cancel()` called exactly once on teardown and no frames after; **no barge-in detection present**.
+**Acceptance criteria:** Once `TEXT_TO_SPEECH` is bound, **the same `deliverReply` returns `'audio'`**, uses the bound implementation, and emits neither `reply.text` nor `tts_unavailable`; a bound provider that yields no frames still returns `'text'`; first frame before full generation; chunker handles abbreviations, terminators, end-flush, empty input; text fallback on repeat failure; `cancel()` called exactly once on teardown and no frames after; **no barge-in detection present**.
 
 **Security checks:** `ELEVENLABS_API_KEY` server-side only, never logged, never sent to the client; provider errors surface as `tts_unavailable`, never as provider text.
 

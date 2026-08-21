@@ -210,7 +210,12 @@ every inbound frame against it.
 **Server → client**
 
 `session.ready {sessionId}` · `session.rotated {sessionId}` · `stt.partial {text}` ·
-`agent.thinking` · `audio.frame` (binary) · `turn.complete` · `error {code}` (§2.8)
+`agent.thinking` · `audio.frame` (binary) · `reply.text {text}` · `turn.complete` ·
+`error {code}` (§2.8)
+
+`reply.text` carries the spoken reply as text. It is the delivery half of the §6 TTS fallback —
+the failure table promised text on the socket but the frame list did not previously name a frame
+able to carry it. It is emitted **only** on the fallback path, never alongside audio.
 
 **Validation rules, tested in T2:**
 
@@ -313,8 +318,27 @@ fragment speech, and a flush at end-of-stream.
 Audio frames are forwarded to the transport as they arrive. `TextToSpeech` interface:
 `synthesise(text) → AsyncIterable<AudioFrame>`, plus `cancel()`.
 
+**One delivery path, two outcomes.** A reply is delivered by a single function that either speaks
+it or sends it as text — never both, and never a second copy of the logic. It reports which outcome
+occurred, so "no audio was produced" is a value the tests can assert rather than an absence they
+have to infer:
+
+```
+deliverReply(transport, text) -> 'audio' | 'text'
+```
+
+`'text'` means the caller heard nothing: `reply.text` plus `tts_unavailable` went down the socket
+and no `audio.frame` did. **A missing provider is never reported as `'audio'`.** The unbound-token
+state and a provider that throws take the *same* branch — there is deliberately no separate
+"no provider configured" path to drift out of sync with the "provider failed" one.
+
 **The interface and its DI token are declared in T2, alongside `AudioTransport`; the ElevenLabs
-implementation behind them is entirely T5's.** They are split because the STT confidence gate (§3)
+implementation behind them is entirely T5's.** The token is injected **optionally**, because T4 and T5 are parallel siblings and nothing binds
+`TEXT_TO_SPEECH` until T5 lands: a required injection would leave the app unable to boot in the
+window between them. Optional injection is not permission to fail silently — §10 requires tests
+proving the unbound state boots, falls back visibly, and is never mistaken for success.
+
+They are split because the STT confidence gate (§3)
 has to speak a re-prompt, and T4 depends only on T2 — without the interface at the seam, T4 would
 have to depend on T5 and two deliberately parallel tasks would serialise. T4 consumes the interface
 through a fake and never touches a provider. Declaring a seam is not implementing what sits behind
@@ -369,7 +393,7 @@ not.
 |---|---|
 | STT unavailable | Spoken apology + handoff; `stt_unavailable` to client |
 | Agent/Anthropic error | Existing `FRONT_DESK_FALLBACK_REPLY`, spoken; `agent_unavailable` |
-| TTS unavailable | Deliver the reply as text on the socket so the turn is not lost; `tts_unavailable` |
+| TTS unavailable — provider threw, **or no provider bound yet** | Both take the same branch: `reply.text` with the reply, then `tts_unavailable`, and no `audio.frame`. The turn is not lost and the caller is not told audio was produced |
 | Rate limited | `rate_limited`, connection closed |
 | Session expired | `session_expired`; client starts a new session |
 | Duplicate socket | `session_conflict`, second connection closed, first untouched |
@@ -443,6 +467,7 @@ transcript is written to logs.
 | Idempotency across rotation | A retry spanning a rotation still de-duplicates |
 | Confidence gate | Below-threshold final → re-prompt, agent invoked exactly 0 times |
 | Teardown | Disconnect mid-synthesis calls `cancel()` once; no further frames |
+| TTS absent | Boots with no `TEXT_TO_SPEECH` bound; the same delivery path returns `'text'`, emits `reply.text` + `tts_unavailable`, emits zero audio frames, and is never reported as success; exactly one `tts_unavailable` emission site exists in `src/` |
 | Secret hygiene | No `sessionId` or provider key in any log line or client frame |
 | Regression | The whole Phase 0 suite continues to pass unchanged |
 
@@ -540,6 +565,10 @@ Accept: static import-graph test — gateway imports neither `ToolRegistryServic
 — **with a mutation check**; unknown frame type rejected; unknown field rejected; a frame carrying
 `patientId`/`userId`/`identityVerified` rejected **and session state provably unchanged**; a full
 turn driven end-to-end through `turn.text` against a stubbed agent; Phase 3 seam documented.
+Also: the module **boots with no `TEXT_TO_SPEECH` bound**; in that state `deliverReply` returns
+`'text'`, emits `reply.text` then `tts_unavailable`, emits **zero** audio frames, and never reports
+`'audio'`; a source scan proves exactly **one** `tts_unavailable` emission site, so no second
+fallback mechanism can be added without the test failing.
 
 **T1b — `session.rotated` control frame**
 Deps: T1a, T2. *(Split out of T1: the frame needs a transport to travel on, which did not exist at
@@ -576,7 +605,9 @@ the `cancel()` behaviour. It implements the interface; it does not redefine it.
 Accept: first frame emitted before the full reply is generated; chunker unit-tested including
 abbreviations and end-flush; text fallback when TTS fails; **teardown tests** — disconnect
 mid-synthesis calls `cancel()` exactly once and emits no further audio frames; no barge-in detection
-present.
+present. Also: once `TEXT_TO_SPEECH` is bound, **the same `deliverReply` path** returns `'audio'`,
+uses the bound implementation, and emits no `tts_unavailable` — proving T5 changes which
+implementation runs, not which path runs.
 
 **T6 — Public route and browser widget**
 Deps: T3, T4, T5, **T7**. *(T7 added so the widget is never exposed before the error surface is
@@ -670,6 +701,13 @@ contradiction: T4's confidence gate must speak a re-prompt, but `TextToSpeech` s
 depends only on T2. Resolved by moving the **interface and DI token only** into T2 and leaving the
 ElevenLabs implementation wholly in T5. The dependency graph is unchanged — T4 still depends on T2
 alone, and T4/T5 remain parallel siblings. No task was added, removed, merged, split or reordered.
+
+**Amendment, 2026-08-20 (optional-injection review).** Optional injection of `TEXT_TO_SPEECH` is
+kept — it is what lets T2 and T5 land independently — but it is no longer allowed to be a silent
+production failure path. §4 now defines a single `deliverReply` returning `'audio' | 'text'`, §6's
+failure row covers "no provider bound" and "provider threw" as one branch, §2.7 gains the
+`reply.text` frame the fallback always needed, and §10 requires tests that the unbound state boots,
+falls back visibly, and is never counted as success. No architecture, task or dependency changed.
 
 Also corrected: §2.6 previously claimed to mirror "the Phase 0 test that pins `ToolExecutorService`
 as the only dispatch site". **No such test exists** — Phase 0 pins the executor's behaviour, not the
