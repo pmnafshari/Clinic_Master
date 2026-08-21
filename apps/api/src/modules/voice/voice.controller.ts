@@ -14,6 +14,7 @@ import { Throttle } from '@nestjs/throttler';
 import { ClaudeAgentService } from './agent/claude.agent';
 import { createAnonymousSession } from './session/voice-session';
 import { Conversation, VoiceSessionStore } from './session/voice-session.store';
+import { privilegeChanged, snapshotPrivilege } from './session/privilege-change';
 
 import { VoiceTextDto } from './dto/voice-text.dto';
 import { VOICE_CONFIG, VOICE_FEATURE_FLAG, VoiceFeatureFlag } from './voice.config';
@@ -142,6 +143,13 @@ export class VoiceController {
      * idempotency nonce all originate server-side — from createAnonymousSession
      * or from the stored session — so no request body can set or override them.
      */
+    /**
+     * Snapshot before the turn. `patientId` is bound deep inside a tool, so the
+     * only place the change is observable without teaching the agent or the
+     * executor about the session store is on either side of this call.
+     */
+    const before = snapshotPrivilege(conversation.session);
+
     const turn = await this.agent.respond(
       conversation.session,
       dto.message,
@@ -152,7 +160,23 @@ export class VoiceController {
     // Keyed by the server's own id, never the client's. Re-set on every turn:
     // refreshes the TTL and marks the conversation as recently used, so an
     // active caller is not evicted ahead of a quiet one.
-    this.sessions.set(conversation.session.sessionId, conversation);
+    const previousId = conversation.session.sessionId;
+    this.sessions.set(previousId, conversation);
+
+    /**
+     * The session can now act for a specific patient, so the credential the
+     * caller has been using — which an attacker may have planted before the
+     * conversation started — is replaced and the old one destroyed. Rotation
+     * lands at end of turn rather than the instant the tool returns: the tool
+     * runs inside the executor, which must not know about the session store.
+     *
+     * `rotate` updates `conversation.session.sessionId` in place, so the
+     * response below returns the new authoritative id with no change to the
+     * response shape.
+     */
+    if (privilegeChanged(before, conversation.session)) {
+      this.sessions.rotate(previousId);
+    }
 
     return {
       // Always returned, so the caller knows which id is authoritative — on
