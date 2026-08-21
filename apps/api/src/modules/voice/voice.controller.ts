@@ -12,17 +12,15 @@ import {
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { ClaudeAgentService } from './agent/claude.agent';
-import { createAnonymousSession, VoiceSession } from './session/voice-session';
+import { createAnonymousSession } from './session/voice-session';
+import { Conversation, VoiceSessionStore } from './session/voice-session.store';
 
 import { VoiceTextDto } from './dto/voice-text.dto';
 import { VOICE_CONFIG, VOICE_FEATURE_FLAG, VoiceFeatureFlag } from './voice.config';
-import { BoundedTtlMap, Clock, VOICE_CLOCK } from './util/bounded-ttl-map';
 
-/** A quiet conversation is dropped well before a real caller would return. */
-export const SESSION_TTL_MS = 30 * 60 * 1000;
-
-/** Hard ceiling on concurrently tracked conversations. */
-export const MAX_ACTIVE_SESSIONS = 1000;
+// Both now live with the store that enforces them. Re-exported here because
+// they were part of this module's public surface first.
+export { SESSION_TTL_MS, MAX_ACTIVE_SESSIONS } from './session/voice-session.store';
 
 /**
  * How many complete user turns of transcript are resent to the model.
@@ -78,36 +76,16 @@ export function trimHistory(
   return history.slice(turnStarts[turnStarts.length - maxTurns]);
 }
 
-interface Conversation {
-  session: VoiceSession;
-  history: Anthropic.MessageParam[];
-}
-
 @ApiTags('voice')
 @Controller('voice')
 export class VoiceController {
-  /**
-   * Phase 0 keeps sessions in memory. Browser and phone phases move this to
-   * Redis.
-   *
-   * Bounded because the key is a client-supplied sessionId: an unevicted Map
-   * here lets a caller who varies the sessionId grow the process without limit.
-   */
-  private readonly sessions: BoundedTtlMap<Conversation>;
-
   constructor(
     private agent: ClaudeAgentService,
+    private sessions: VoiceSessionStore,
     @Optional()
     @Inject(VOICE_FEATURE_FLAG)
-    private readonly flag: VoiceFeatureFlag = VOICE_CONFIG,
-    @Optional() @Inject(VOICE_CLOCK) clock?: Clock
-  ) {
-    this.sessions = new BoundedTtlMap<Conversation>(
-      MAX_ACTIVE_SESSIONS,
-      SESSION_TTL_MS,
-      clock ?? (() => Date.now())
-    );
-  }
+    private readonly flag: VoiceFeatureFlag = VOICE_CONFIG
+  ) {}
 
   /**
    * Tighter than the global 100/min/IP, because a request here is not cheap:

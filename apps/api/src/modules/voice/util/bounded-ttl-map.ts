@@ -72,6 +72,15 @@ export class BoundedTtlMap<V> {
     this.entries.set(key, { value, expiresAt: this.now() + this.ttlMs });
   }
 
+  /**
+   * Removes a key outright. Rotation needs this: an old sessionId must stop
+   * working the moment a new one is issued, not when its TTL happens to run
+   * out — an expiring credential is still a live credential.
+   */
+  delete(key: string): void {
+    this.entries.delete(key);
+  }
+
   private sweepExpired(): void {
     const now = this.now();
 

@@ -19,6 +19,7 @@ import { CancelAppointmentTool } from './tools/cancel-appointment.tool';
 import { IdempotencyService } from './idempotency/idempotency.service';
 import { ClaudeAgentService } from './agent/claude.agent';
 import { VoiceController } from './voice.controller';
+import { VoiceSessionStore } from './session/voice-session.store';
 import { VOICE_CONFIG, VOICE_FEATURE_FLAG } from './voice.config';
 
 @Module({
@@ -26,6 +27,7 @@ import { VOICE_CONFIG, VOICE_FEATURE_FLAG } from './voice.config';
   controllers: [VoiceController],
   providers: [
     ClaudeAgentService,
+    VoiceSessionStore,
     { provide: VOICE_FEATURE_FLAG, useValue: VOICE_CONFIG },
     ToolRegistryService,
     ToolExecutorService,
@@ -41,7 +43,7 @@ import { VOICE_CONFIG, VOICE_FEATURE_FLAG } from './voice.config';
     CancelAppointmentTool,
     IdempotencyService,
   ],
-  exports: [ToolRegistryService, ToolExecutorService],
+  exports: [ToolRegistryService, ToolExecutorService, VoiceSessionStore],
 })
 export class VoiceModule implements OnModuleInit {
   constructor(

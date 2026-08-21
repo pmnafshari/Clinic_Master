@@ -7,6 +7,7 @@ import {
   VoiceController,
   MAX_ACTIVE_SESSIONS,
 } from '../../src/modules/voice/voice.controller';
+import { VoiceSessionStore } from '../../src/modules/voice/session/voice-session.store';
 import { VoiceTextDto } from '../../src/modules/voice/dto/voice-text.dto';
 import {
   ClaudeAgentService,
@@ -73,6 +74,7 @@ async function buildHarness(): Promise<Harness> {
   const moduleRef: TestingModule = await Test.createTestingModule({
     controllers: [VoiceController],
     providers: [
+      VoiceSessionStore,
       ToolRegistryService,
       ToolExecutorService,
       ClaudeAgentService,

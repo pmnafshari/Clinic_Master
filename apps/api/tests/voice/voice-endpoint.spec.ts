@@ -12,6 +12,7 @@ import {
   trimHistory,
   VoiceController,
 } from '../../src/modules/voice/voice.controller';
+import { VoiceSessionStore } from '../../src/modules/voice/session/voice-session.store';
 import { VoiceTextDto } from '../../src/modules/voice/dto/voice-text.dto';
 import {
   ClaudeAgentService,
@@ -52,6 +53,7 @@ async function buildApp(options: {
   const moduleRef: TestingModule = await Test.createTestingModule({
     controllers: [VoiceController],
     providers: [
+      VoiceSessionStore,
       ToolRegistryService,
       ToolExecutorService,
       ClaudeAgentService,
@@ -311,6 +313,7 @@ describe('POST /api/voice/text — rate limiting', () => {
       imports: [ThrottlerModule.forRoot([{ name: 'default', ttl: 60000, limit: 100 }])],
       controllers: [VoiceController],
       providers: [
+      VoiceSessionStore,
         ToolRegistryService,
         ToolExecutorService,
         ClaudeAgentService,
@@ -529,6 +532,7 @@ describe('POST /api/voice/text — history is bounded across a long conversation
     const moduleRef: TestingModule = await Test.createTestingModule({
       controllers: [VoiceController],
       providers: [
+      VoiceSessionStore,
         ToolRegistryService,
         ToolExecutorService,
         ClaudeAgentService,
