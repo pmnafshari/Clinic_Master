@@ -10,7 +10,7 @@ import { ServerFrame } from '../../src/modules/voice/transport/frames';
 import { VoiceErrorCode } from '../../src/modules/voice/transport/error-codes';
 import { WS_MAX_UPLINK_BYTES_PER_TURN } from '../../src/modules/voice/transport/transport-limits';
 import {
-  SPEECH_TO_TEXT,
+  SPEECH_TO_TEXT_FACTORY,
   SpeechToText,
   SttFinal,
   STT_MIN_CONFIDENCE,
@@ -105,7 +105,7 @@ class FakeTts implements TextToSpeech {
   }
 }
 
-async function build(options: { withTts?: boolean } = {}) {
+async function build(options: { withTts?: boolean; startError?: Error } = {}) {
   const agentCalls: string[] = [];
   const client: AnthropicLike = {
     messages: {
@@ -120,7 +120,14 @@ async function build(options: { withTts?: boolean } = {}) {
     },
   };
 
-  const stt = new FakeStt();
+  // A factory, matching production: each connection gets its own recogniser.
+  const created: FakeStt[] = [];
+  const sttFactory = () => {
+    const instance = new FakeStt();
+    if (options.startError) instance.startError = options.startError;
+    created.push(instance);
+    return instance;
+  };
   const tts = new FakeTts();
 
   const providers: Provider[] = [
@@ -133,7 +140,7 @@ async function build(options: { withTts?: boolean } = {}) {
     IdempotencyService,
     { provide: AuditService, useValue: { log: jest.fn().mockResolvedValue(undefined) } },
     { provide: ANTHROPIC_CLIENT, useValue: client },
-    { provide: SPEECH_TO_TEXT, useValue: stt },
+    { provide: SPEECH_TO_TEXT_FACTORY, useValue: sttFactory },
   ];
   if (options.withTts) providers.push({ provide: TEXT_TO_SPEECH, useValue: tts });
 
@@ -142,7 +149,9 @@ async function build(options: { withTts?: boolean } = {}) {
   return {
     gateway: moduleRef.get(VoiceGateway),
     store: moduleRef.get(VoiceSessionStore),
-    stt,
+    /** The recogniser built for the most recent connection. */
+    stt: () => created[created.length - 1],
+    created,
     tts,
     agentCalls,
   };
@@ -164,7 +173,7 @@ describe('STT confidence gate', () => {
     await gateway.handleFrame(t, { type: 'session.start' });
     await gateway.handleAudio(t, Buffer.alloc(640));
 
-    await stt.emitFinal('I would like to book a cleaning', 0.95);
+    await stt().emitFinal('I would like to book a cleaning', 0.95);
 
     expect(agentCalls).toEqual(['I would like to book a cleaning']);
     expect(t.typesSent()).toContain('turn.complete');
@@ -176,7 +185,7 @@ describe('STT confidence gate', () => {
     await gateway.handleFrame(t, { type: 'session.start' });
     await gateway.handleAudio(t, Buffer.alloc(640));
 
-    await stt.emitFinal('book a cleaning', STT_MIN_CONFIDENCE);
+    await stt().emitFinal('book a cleaning', STT_MIN_CONFIDENCE);
 
     expect(agentCalls).toHaveLength(1);
   });
@@ -187,7 +196,7 @@ describe('STT confidence gate', () => {
     await gateway.handleFrame(t, { type: 'session.start' });
     await gateway.handleAudio(t, Buffer.alloc(640));
 
-    await stt.emitFinal('my date of birth is nineteen eighty', 0.41);
+    await stt().emitFinal('my date of birth is nineteen eighty', 0.41);
 
     // The whole point: the model is never asked whether it heard correctly.
     expect(agentCalls).toHaveLength(0);
@@ -201,7 +210,7 @@ describe('STT confidence gate', () => {
     const id = readyId(t);
     await gateway.handleAudio(t, Buffer.alloc(640));
 
-    await stt.emitFinal('mumble', 0.2);
+    await stt().emitFinal('mumble', 0.2);
 
     expect(store.get(id)?.session.turnIndex).toBe(0);
   });
@@ -212,7 +221,7 @@ describe('STT confidence gate', () => {
     await gateway.handleFrame(t, { type: 'session.start' });
     await gateway.handleAudio(t, Buffer.alloc(640));
 
-    await stt.emitFinal('mumble', 0.2);
+    await stt().emitFinal('mumble', 0.2);
 
     // No TTS bound, so the shared delivery path falls back to text — the same
     // fallback any reply gets. A second re-prompt mechanism would show up here.
@@ -228,8 +237,8 @@ describe('interim results', () => {
     await gateway.handleFrame(t, { type: 'session.start' });
     await gateway.handleAudio(t, Buffer.alloc(640));
 
-    stt.emitPartial('I would like');
-    stt.emitPartial('I would like to book');
+    stt().emitPartial('I would like');
+    stt().emitPartial('I would like to book');
 
     expect(agentCalls).toHaveLength(0);
     expect(t.sent).toContainEqual({ type: 'stt.partial', text: 'I would like to book' });
@@ -238,8 +247,9 @@ describe('interim results', () => {
 
 describe('provider and transcript failure states', () => {
   it('reports stt_unavailable when the recogniser cannot start', async () => {
-    const { gateway, stt, agentCalls } = await build();
-    stt.startError = new Error('Deepgram: 401 Unauthorized (project 9f2a)');
+    const { gateway, agentCalls } = await build({
+      startError: new Error('Deepgram: 401 Unauthorized (project 9f2a)'),
+    });
     const t = new FakeTransport();
     await gateway.handleFrame(t, { type: 'session.start' });
 
@@ -257,8 +267,8 @@ describe('provider and transcript failure states', () => {
     await gateway.handleFrame(t, { type: 'session.start' });
     await gateway.handleAudio(t, Buffer.alloc(640));
 
-    await stt.emitFinal('', 0.99);
-    await stt.emitFinal('   ', 0.99);
+    await stt().emitFinal('', 0.99);
+    await stt().emitFinal('   ', 0.99);
 
     expect(agentCalls).toHaveLength(0);
   });
@@ -269,11 +279,11 @@ describe('provider and transcript failure states', () => {
     await gateway.handleFrame(t, { type: 'session.start' });
     await gateway.handleAudio(t, Buffer.alloc(640));
 
-    await stt.emitRaw({ text: 'book me in' });               // no confidence
-    await stt.emitRaw({ confidence: 0.9 });                   // no text
-    await stt.emitRaw({ text: 42, confidence: 0.9 });         // wrong type
-    await stt.emitRaw({ text: 'hi', confidence: 'high' });     // wrong type
-    await stt.emitRaw(null);
+    await stt().emitRaw({ text: 'book me in' });               // no confidence
+    await stt().emitRaw({ confidence: 0.9 });                   // no text
+    await stt().emitRaw({ text: 42, confidence: 0.9 });         // wrong type
+    await stt().emitRaw({ text: 'hi', confidence: 'high' });     // wrong type
+    await stt().emitRaw(null);
 
     // A missing confidence must not be read as a confident transcript.
     expect(agentCalls).toHaveLength(0);
@@ -287,7 +297,7 @@ describe('provider and transcript failure states', () => {
 
     await t.fireTeardown();
 
-    expect(stt.ended).toBe(1);
+    expect(stt().ended).toBe(1);
   });
 
   it('ends the recogniser stream when the caller signals audio.end', async () => {
@@ -298,7 +308,7 @@ describe('provider and transcript failure states', () => {
 
     await gateway.handleFrame(t, { type: 'audio.end' });
 
-    expect(stt.ended).toBe(1);
+    expect(stt().ended).toBe(1);
   });
 
   it('starts the recogniser once per connection, not once per chunk', async () => {
@@ -310,17 +320,19 @@ describe('provider and transcript failure states', () => {
     await gateway.handleAudio(t, Buffer.alloc(640));
     await gateway.handleAudio(t, Buffer.alloc(640));
 
-    expect(stt.started).toBe(1);
-    expect(stt.written).toHaveLength(3);
+    expect(stt().started).toBe(1);
+    expect(stt().written).toHaveLength(3);
   });
 
   it('drops audio from a socket with no session rather than starting a stream', async () => {
-    const { gateway, stt } = await build();
+    const { gateway, created } = await build();
     const t = new FakeTransport();
 
     await gateway.handleAudio(t, Buffer.alloc(640));
 
-    expect(stt.started).toBe(0);
+    // No recogniser is even built: an unbound socket cannot open a provider
+    // stream, so it cannot be used to burn provider quota either.
+    expect(created).toHaveLength(0);
     expect(t.sent).toContainEqual({ type: 'error', code: 'session_expired' });
   });
 });
@@ -351,7 +363,7 @@ describe('uplink byte cap at the audio-frame boundary', () => {
       await gateway.handleAudio(t, chunk);
     }
 
-    const forwarded = stt.written.reduce((n, b) => n + b.length, 0);
+    const forwarded = stt().written.reduce((n, b) => n + b.length, 0);
     expect(forwarded).toBeLessThanOrEqual(WS_MAX_UPLINK_BYTES_PER_TURN);
   });
 
@@ -364,7 +376,7 @@ describe('uplink byte cap at the audio-frame boundary', () => {
     const half = Math.floor(WS_MAX_UPLINK_BYTES_PER_TURN / chunk.length / 2);
     for (let i = 0; i < half; i++) await gateway.handleAudio(t, chunk);
 
-    await stt.emitFinal('book a cleaning please', 0.95);
+    await stt().emitFinal('book a cleaning please', 0.95);
 
     for (let i = 0; i < half; i++) await gateway.handleAudio(t, chunk);
 
@@ -386,9 +398,9 @@ describe('secret and transcript hygiene', () => {
     const sessionId = readyId(t);
     await gateway.handleAudio(t, Buffer.alloc(640));
 
-    stt.emitPartial('my date of birth is the fourth of June');
-    await stt.emitFinal('my phone number is five five five oh one hundred', 0.95);
-    await stt.emitFinal('mumble mumble', 0.1);
+    stt().emitPartial('my date of birth is the fourth of June');
+    await stt().emitFinal('my phone number is five five five oh one hundred', 0.95);
+    await stt().emitFinal('mumble mumble', 0.1);
 
     const joined = lines.join('\n');
     expect(joined).not.toContain('date of birth');

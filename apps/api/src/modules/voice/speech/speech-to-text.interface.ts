@@ -1,7 +1,22 @@
 import { VoiceSession } from '../session/voice-session';
 
-/** DI token so a fake can be substituted without touching the gateway. */
-export const SPEECH_TO_TEXT = Symbol('SPEECH_TO_TEXT');
+/**
+ * DI token for a FACTORY, not an instance.
+ *
+ * A SpeechToText holds one provider socket and one set of handlers, so it is
+ * per-connection state by construction. Injecting an instance into the
+ * singleton gateway gave every concurrent caller the same object: the second
+ * caller's `start()` replaced the first's socket, and both callers' handlers
+ * accumulated on one list, so each of them received the other's transcript.
+ *
+ * A factory makes the lifetime explicit — one recogniser per accepted
+ * connection, created when that connection first sends audio and discarded
+ * with it. Scope.TRANSIENT would not fix this: the gateway is a singleton, so
+ * it would still receive a single instance for its whole lifetime.
+ */
+export const SPEECH_TO_TEXT_FACTORY = Symbol('SPEECH_TO_TEXT_FACTORY');
+
+export type SpeechToTextFactory = () => SpeechToText;
 
 /**
  * Below this, the transport asks the caller to repeat instead of guessing.

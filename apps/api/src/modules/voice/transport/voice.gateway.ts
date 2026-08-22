@@ -2,8 +2,9 @@ import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import {
   isUsableFinal,
   LOW_CONFIDENCE_REPROMPT,
-  SPEECH_TO_TEXT,
+  SPEECH_TO_TEXT_FACTORY,
   SpeechToText,
+  SpeechToTextFactory,
   STT_MIN_CONFIDENCE,
 } from '../speech/speech-to-text.interface';
 import { TEXT_TO_SPEECH, TextToSpeech } from '../speech/text-to-speech.interface';
@@ -73,11 +74,12 @@ export class VoiceGateway {
      */
     @Optional() @Inject(TEXT_TO_SPEECH) private readonly tts?: TextToSpeech,
     /**
-     * Optional for the same reason as the speech synthesiser: a deployment
-     * with no recogniser configured must still boot and still serve text
-     * turns. Audio arriving with none bound reports stt_unavailable.
+     * A factory, so each connection gets its own recogniser. Optional for the
+     * same reason as the speech synthesiser: a deployment with none configured
+     * must still boot and still serve text turns. Audio arriving with no
+     * factory bound reports stt_unavailable.
      */
-    @Optional() @Inject(SPEECH_TO_TEXT) private readonly stt?: SpeechToText
+    @Optional() @Inject(SPEECH_TO_TEXT_FACTORY) private readonly sttFactory?: SpeechToTextFactory
   ) {}
 
   async handleFrame(transport: AudioTransport, raw: unknown): Promise<void> {
@@ -195,7 +197,9 @@ export class VoiceGateway {
     }
 
     if (!state.stt) {
-      const recogniser = this.stt;
+      // One recogniser per connection. Sharing one would mean this caller's
+      // handlers also fire for every other caller's transcript.
+      const recogniser = this.sttFactory?.();
       if (!recogniser) {
         state.sttFailed = true;
         transport.send({ type: 'error', code: 'stt_unavailable' });
