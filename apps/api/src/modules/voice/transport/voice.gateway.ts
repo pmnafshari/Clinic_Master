@@ -4,7 +4,19 @@ import { createAnonymousSession } from '../session/voice-session';
 import { Conversation, VoiceSessionStore } from '../session/voice-session.store';
 import { AudioTransport } from './audio-transport.interface';
 import { parseClientFrame } from './frames';
+import {
+  WS_MAX_TURNS_PER_MINUTE,
+  WS_MAX_TURNS_PER_SESSION,
+  WS_RATE_WINDOW_MS,
+} from './transport-limits';
 import { VoiceTurnRunner } from './voice-turn-runner';
+
+/** Per-connection counters. Transport bookkeeping, never session state. */
+interface ConnectionState {
+  sessionId: string;
+  turns: number;
+  recentTurnsAt: number[];
+}
 
 /**
  * BrowserWebSocketTransport's frame handling.
@@ -20,8 +32,21 @@ import { VoiceTurnRunner } from './voice-turn-runner';
 export class VoiceGateway {
   private readonly logger = new Logger(VoiceGateway.name);
 
-  /** Which session each live socket is bound to. */
-  private readonly bound = new WeakMap<AudioTransport, string>();
+  /**
+   * Per-socket bookkeeping. Keyed by the transport so it disappears with the
+   * connection. Holds no identity: which patient a session may act for lives in
+   * the store and nowhere else.
+   */
+  private readonly connections = new WeakMap<AudioTransport, ConnectionState>();
+
+  /**
+   * The live socket holding each session, for one-socket-per-session.
+   *
+   * A plain Map because it must be enumerable by session id. Entries are
+   * removed on teardown; the store's own session cap bounds how many can
+   * accumulate if a socket dies without notifying us.
+   */
+  private readonly liveSockets = new Map<string, AudioTransport>();
 
   constructor(
     private readonly sessions: VoiceSessionStore,
@@ -47,26 +72,100 @@ export class VoiceGateway {
 
     if (frame.type === 'session.start') {
       const sessionId = this.resume(frame.sessionId);
-      this.bound.set(transport, sessionId);
+
+      /**
+       * One live socket per session. A second connection presenting the same
+       * id is rejected rather than joined: joining would let a stolen id
+       * eavesdrop on a live conversation.
+       *
+       * The FIRST socket is left untouched. Closing it instead would let
+       * anyone holding a stolen id kick the legitimate caller off their call.
+       *
+       * This is only reachable by someone already presenting a live 256-bit
+       * id, so it is not an enumeration path — an attacker who can produce one
+       * has already learned everything the rejection would tell them.
+       */
+      if (this.liveSockets.has(sessionId)) {
+        transport.close('session_conflict');
+        return;
+      }
+
+      this.connections.set(transport, { sessionId, turns: 0, recentTurnsAt: [] });
+      this.liveSockets.set(sessionId, transport);
+
+      // Release the claim however the socket ends — clean close, dropped
+      // client, duration cap. Guarded so a double fire cannot free a slot a
+      // reconnected caller has since taken.
+      transport.onTeardown(() => {
+        const state = this.connections.get(transport);
+        // Release only a claim this socket still holds. The identity check is
+        // what makes a repeated teardown safe: a dropped client and a clean
+        // close can both fire, and by then the session may belong to a
+        // reconnected socket whose slot must not be freed underneath it.
+        if (state && this.liveSockets.get(state.sessionId) === transport) {
+          this.liveSockets.delete(state.sessionId);
+        }
+      });
+
       transport.send({ type: 'session.ready', sessionId });
       return;
     }
 
     if (frame.type === 'turn.text') {
-      const sessionId = this.bound.get(transport);
-      const conversation = sessionId ? this.sessions.get(sessionId) : undefined;
+      const state = this.connections.get(transport);
+      const conversation = state ? this.sessions.get(state.sessionId) : undefined;
 
-      if (!conversation) {
+      if (!state || !conversation) {
         transport.send({ type: 'error', code: 'session_expired' });
         return;
       }
 
+      if (!this.underTurnLimits(state, conversation.session.logId)) {
+        transport.send({ type: 'error', code: 'rate_limited' });
+        transport.close('rate_limited');
+        return;
+      }
+
       const outcome = await this.runner.runTurn(transport, conversation, frame.text);
-      this.bound.set(transport, outcome.sessionId);
+
+      // Rotation re-keys the session, so the socket's claim moves with it.
+      if (outcome.sessionId !== state.sessionId) {
+        if (this.liveSockets.get(state.sessionId) === transport) {
+          this.liveSockets.delete(state.sessionId);
+        }
+        state.sessionId = outcome.sessionId;
+        this.liveSockets.set(outcome.sessionId, transport);
+      }
 
       await this.deliverReply(transport, outcome.reply);
       transport.send({ type: 'turn.complete' });
     }
+  }
+
+  /**
+   * Counts the turn and reports whether it may run.
+   *
+   * Both caps are enforced before the agent is called, so an over-limit turn
+   * costs nothing. `logId` is used for the log line — never the sessionId,
+   * which is a bearer credential.
+   */
+  private underTurnLimits(state: ConnectionState, logId: string): boolean {
+    const now = Date.now();
+    state.recentTurnsAt = state.recentTurnsAt.filter((t) => now - t < WS_RATE_WINDOW_MS);
+
+    if (state.turns >= WS_MAX_TURNS_PER_SESSION) {
+      this.logger.warn(`Session turn cap reached for ${logId}`);
+      return false;
+    }
+
+    if (state.recentTurnsAt.length >= WS_MAX_TURNS_PER_MINUTE) {
+      this.logger.warn(`Turn rate cap reached for ${logId}`);
+      return false;
+    }
+
+    state.turns += 1;
+    state.recentTurnsAt.push(now);
+    return true;
   }
 
   /**
