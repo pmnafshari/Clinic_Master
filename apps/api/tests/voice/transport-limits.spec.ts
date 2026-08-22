@@ -49,20 +49,25 @@ describe('websocket limits', () => {
     expect(WS_MAX_UPLINK_BYTES_PER_TURN).toBeGreaterThan(WS_MAX_FRAME_BYTES);
   });
 
-  // Declared and pinned, but deliberately not yet enforced: no frame carries
-  // audio, so there is nothing to count. This test records that honestly
-  // rather than letting the constant imply a control that does not exist.
-  it('documents that the uplink cap is not enforced until an audio path exists', () => {
-    const source = readFileSync(
-      join(__dirname, '../../src/modules/voice/transport/transport-limits.ts'),
-      'utf8'
-    );
-    expect(source).toMatch(/DECLARED BUT NOT YET ENFORCED/);
+  // Every constant here must be enforced somewhere. This test previously
+  // recorded the uplink cap as declared-but-unenforced and failed the moment
+  // enforcement landed, which is what it was for; it now pins the enforcement
+  // point instead, so the constant can never drift back into being decorative.
+  it('enforces every declared limit somewhere in the transport', () => {
+    const dir = join(__dirname, '../../src/modules/voice/transport');
+    const gateway = readFileSync(join(dir, 'voice.gateway.ts'), 'utf8');
+    const adapter = readFileSync(join(dir, 'ws-origin.adapter.ts'), 'utf8');
+    const enforcement = gateway + adapter;
 
-    const gateway = readFileSync(
-      join(__dirname, '../../src/modules/voice/transport/voice.gateway.ts'),
-      'utf8'
-    );
-    expect(gateway).not.toContain('WS_MAX_UPLINK_BYTES_PER_TURN');
+    for (const name of [
+      'WS_MAX_FRAME_BYTES',
+      'WS_MAX_CONNECTIONS_PER_IP_PER_MINUTE',
+      'WS_MAX_TURNS_PER_SESSION',
+      'WS_MAX_TURNS_PER_MINUTE',
+      'WS_MAX_CONNECTION_MS',
+      'WS_MAX_UPLINK_BYTES_PER_TURN',
+    ]) {
+      expect(enforcement).toContain(name);
+    }
   });
 });

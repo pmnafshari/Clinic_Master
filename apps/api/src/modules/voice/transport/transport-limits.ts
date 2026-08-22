@@ -23,18 +23,18 @@ export const WS_MAX_TURNS_PER_MINUTE = 10;
 /**
  * Bounds a single turn's audio: 2 MB is far past any plausible utterance.
  *
- * DECLARED BUT NOT YET ENFORCED. There is no audio uplink path in the
- * transport — no frame carries audio, so there is nothing to count. The
- * enforcement point is the audio-frame handler, which arrives with the
- * speech-to-text integration; this constant is pinned here so that work has a
- * value to enforce rather than inventing one.
+ * Enforced in `VoiceGateway.handleAudio`, at the boundary where bytes actually
+ * enter the process. Counting anywhere further in would leave a path that
+ * skips the check. The budget resets when a turn is dispatched, so a long
+ * conversation is not penalised for its earlier turns.
  *
- * Every other constant in this file IS enforced today:
+ * Where every constant in this file is enforced:
  *   WS_MAX_FRAME_BYTES                   — ws server `maxPayload` (ws-origin.adapter.ts)
  *   WS_MAX_CONNECTIONS_PER_IP_PER_MINUTE — verifyClient (ws-origin.adapter.ts)
  *   WS_MAX_TURNS_PER_SESSION             — voice.gateway.ts underTurnLimits
  *   WS_MAX_TURNS_PER_MINUTE              — voice.gateway.ts underTurnLimits
  *   WS_MAX_CONNECTION_MS                 — voice.gateway.ts duration cap timer
+ *   WS_MAX_UPLINK_BYTES_PER_TURN         — voice.gateway.ts handleAudio
  */
 export const WS_MAX_UPLINK_BYTES_PER_TURN = 2 * 1024 * 1024;
 

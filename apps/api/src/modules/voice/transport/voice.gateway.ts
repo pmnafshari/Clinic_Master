@@ -1,4 +1,11 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import {
+  isUsableFinal,
+  LOW_CONFIDENCE_REPROMPT,
+  SPEECH_TO_TEXT,
+  SpeechToText,
+  STT_MIN_CONFIDENCE,
+} from '../speech/speech-to-text.interface';
 import { TEXT_TO_SPEECH, TextToSpeech } from '../speech/text-to-speech.interface';
 import { createAnonymousSession } from '../session/voice-session';
 import { Conversation, VoiceSessionStore } from '../session/voice-session.store';
@@ -6,6 +13,7 @@ import { AudioTransport } from './audio-transport.interface';
 import { parseClientFrame } from './frames';
 import {
   WS_MAX_CONNECTION_MS,
+  WS_MAX_UPLINK_BYTES_PER_TURN,
   WS_MAX_TURNS_PER_MINUTE,
   WS_MAX_TURNS_PER_SESSION,
   WS_RATE_WINDOW_MS,
@@ -17,6 +25,11 @@ interface ConnectionState {
   sessionId: string;
   turns: number;
   recentTurnsAt: number[];
+  /** Lazily started on the first audio chunk: a text-only session opens no provider stream. */
+  stt?: SpeechToText;
+  sttFailed: boolean;
+  /** Bytes accepted for the turn in progress. Reset when a turn is dispatched. */
+  uplinkBytesThisTurn: number;
 }
 
 /**
@@ -58,7 +71,13 @@ export class VoiceGateway {
      * not permission to fail silently: deliverReply reports which mode it used
      * and the absent case is tested.
      */
-    @Optional() @Inject(TEXT_TO_SPEECH) private readonly tts?: TextToSpeech
+    @Optional() @Inject(TEXT_TO_SPEECH) private readonly tts?: TextToSpeech,
+    /**
+     * Optional for the same reason as the speech synthesiser: a deployment
+     * with no recogniser configured must still boot and still serve text
+     * turns. Audio arriving with none bound reports stt_unavailable.
+     */
+    @Optional() @Inject(SPEECH_TO_TEXT) private readonly stt?: SpeechToText
   ) {}
 
   async handleFrame(transport: AudioTransport, raw: unknown): Promise<void> {
@@ -91,7 +110,13 @@ export class VoiceGateway {
         return;
       }
 
-      this.connections.set(transport, { sessionId, turns: 0, recentTurnsAt: [] });
+      this.connections.set(transport, {
+        sessionId,
+        turns: 0,
+        recentTurnsAt: [],
+        sttFailed: false,
+        uplinkBytesThisTurn: 0,
+      });
       this.liveSockets.set(sessionId, transport);
 
       /**
@@ -114,12 +139,18 @@ export class VoiceGateway {
 
       // Release the claim however the socket ends — clean close, dropped
       // client, duration cap.
-      transport.onTeardown(() => {
+      transport.onTeardown(async () => {
         clearTimeout(durationCap);
         this.releaseClaim(transport);
+        await this.endRecogniser(transport);
       });
 
       transport.send({ type: 'session.ready', sessionId });
+      return;
+    }
+
+    if (frame.type === 'audio.end') {
+      await this.endRecogniser(transport);
       return;
     }
 
@@ -132,26 +163,148 @@ export class VoiceGateway {
         return;
       }
 
-      if (!this.underTurnLimits(state, conversation.session.logId)) {
-        transport.send({ type: 'error', code: 'rate_limited' });
-        transport.close('rate_limited');
+      await this.dispatchTurn(transport, state, frame.text);
+    }
+  }
+
+  /**
+   * Caller audio. Binary, so it arrives outside the JSON frame protocol.
+   *
+   * The per-turn uplink cap is enforced here, at the boundary where bytes
+   * actually enter: counting anywhere else would leave a path that skips it.
+   */
+  async handleAudio(transport: AudioTransport, chunk: Buffer): Promise<void> {
+    const state = this.connections.get(transport);
+    const conversation = state ? this.sessions.get(state.sessionId) : undefined;
+
+    if (!state || !conversation) {
+      transport.send({ type: 'error', code: 'session_expired' });
+      return;
+    }
+
+    if (state.sttFailed) {
+      return;
+    }
+
+    state.uplinkBytesThisTurn += chunk.length;
+    if (state.uplinkBytesThisTurn > WS_MAX_UPLINK_BYTES_PER_TURN) {
+      this.logger.warn(`Uplink cap reached for ${conversation.session.logId}`);
+      transport.send({ type: 'error', code: 'rate_limited' });
+      transport.close('rate_limited');
+      return;
+    }
+
+    if (!state.stt) {
+      const recogniser = this.stt;
+      if (!recogniser) {
+        state.sttFailed = true;
+        transport.send({ type: 'error', code: 'stt_unavailable' });
         return;
       }
 
-      const outcome = await this.runner.runTurn(transport, conversation, frame.text);
-
-      // Rotation re-keys the session, so the socket's claim moves with it.
-      if (outcome.sessionId !== state.sessionId) {
-        if (this.liveSockets.get(state.sessionId) === transport) {
-          this.liveSockets.delete(state.sessionId);
-        }
-        state.sessionId = outcome.sessionId;
-        this.liveSockets.set(outcome.sessionId, transport);
+      try {
+        await recogniser.start(conversation.session);
+      } catch {
+        // The provider's message names the provider and often the project.
+        // It is logged by the transport's own error handling, never sent.
+        state.sttFailed = true;
+        this.logger.warn(`Speech recognition unavailable for ${conversation.session.logId}`);
+        transport.send({ type: 'error', code: 'stt_unavailable' });
+        return;
       }
 
-      await this.deliverReply(transport, outcome.reply);
-      transport.send({ type: 'turn.complete' });
+      recogniser.onPartial((text) => {
+        transport.send({ type: 'stt.partial', text });
+      });
+      recogniser.onFinal(async (result) => {
+        await this.handleFinal(transport, result);
+      });
+
+      state.stt = recogniser;
     }
+
+    state.stt.write(chunk);
+  }
+
+  /**
+   * A completed utterance.
+   *
+   * Below the confidence threshold the transport answers on its own and the
+   * agent is never called: asking the model whether it heard correctly would
+   * put a low-confidence transcript into the context and give it something to
+   * guess from, and would mean ClaudeAgentService has to know about
+   * confidence, which it must not.
+   */
+  private async handleFinal(transport: AudioTransport, result: unknown): Promise<void> {
+    const state = this.connections.get(transport);
+    if (!state) {
+      return;
+    }
+
+    // A provider event that does not match the contract is discarded, not
+    // half-trusted. A missing confidence is not a confident transcript.
+    if (!isUsableFinal(result)) {
+      return;
+    }
+
+    state.uplinkBytesThisTurn = 0;
+
+    if (result.confidence < STT_MIN_CONFIDENCE) {
+      // The same delivery path every other reply uses — not a second one.
+      await this.deliverReply(transport, LOW_CONFIDENCE_REPROMPT);
+      return;
+    }
+
+    await this.dispatchTurn(transport, state, result.text);
+  }
+
+  /** Ends the recogniser stream once, however the turn or connection ended. */
+  private async endRecogniser(transport: AudioTransport): Promise<void> {
+    const state = this.connections.get(transport);
+    if (!state?.stt) {
+      return;
+    }
+    const recogniser = state.stt;
+    state.stt = undefined;
+    await recogniser.end();
+  }
+
+  /**
+   * The single path from this transport into the agent.
+   *
+   * Both a typed turn and a spoken one arrive here, so rate limiting, rotation
+   * bookkeeping and reply delivery have exactly one implementation.
+   */
+  private async dispatchTurn(
+    transport: AudioTransport,
+    state: ConnectionState,
+    text: string
+  ): Promise<void> {
+    const conversation = this.sessions.get(state.sessionId);
+    if (!conversation) {
+      transport.send({ type: 'error', code: 'session_expired' });
+      return;
+    }
+
+    if (!this.underTurnLimits(state, conversation.session.logId)) {
+      transport.send({ type: 'error', code: 'rate_limited' });
+      transport.close('rate_limited');
+      return;
+    }
+
+    const outcome = await this.runner.runTurn(transport, conversation, text);
+
+    // Rotation re-keys the session, so the socket's claim moves with it.
+    if (outcome.sessionId !== state.sessionId) {
+      if (this.liveSockets.get(state.sessionId) === transport) {
+        this.liveSockets.delete(state.sessionId);
+      }
+      state.sessionId = outcome.sessionId;
+      this.liveSockets.set(outcome.sessionId, transport);
+    }
+
+    await this.deliverReply(transport, outcome.reply);
+    transport.send({ type: 'turn.complete' });
   }
 
   /**
