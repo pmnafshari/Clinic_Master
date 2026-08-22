@@ -17,6 +17,7 @@ import { createAnonymousSession } from '../session/voice-session';
 import { Conversation, VoiceSessionStore } from '../session/voice-session.store';
 import { AudioTransport } from './audio-transport.interface';
 import { parseClientFrame } from './frames';
+import { logRetry, logServerError, toClientError } from './error-mapper';
 import {
   WS_MAX_CONNECTION_MS,
   WS_MAX_UPLINK_BYTES_PER_TURN,
@@ -94,6 +95,20 @@ export class VoiceGateway {
   ) {}
 
   async handleFrame(transport: AudioTransport, raw: unknown): Promise<void> {
+    try {
+      await this.routeFrame(transport, raw);
+    } catch (error) {
+      // Nothing may escape this method. An unhandled rejection would take the
+      // connection down without ever telling the caller anything, and the
+      // provider's own words must not travel in its place.
+      const logId = this.logIdFor(transport);
+      logServerError(this.logger, logId, error);
+      transport.send(toClientError(error, 'agent_unavailable'));
+      transport.send({ type: 'turn.complete' });
+    }
+  }
+
+  private async routeFrame(transport: AudioTransport, raw: unknown): Promise<void> {
     const parsed = parseClientFrame(raw);
 
     if (!parsed.ok) {
@@ -221,12 +236,12 @@ export class VoiceGateway {
 
       try {
         await recogniser.start(conversation.session);
-      } catch {
-        // The provider's message names the provider and often the project.
-        // It is logged by the transport's own error handling, never sent.
+      } catch (error) {
+        // The provider's message names the provider and often the project, so
+        // it is logged here and never sent.
         state.sttFailed = true;
-        this.logger.warn(`Speech recognition unavailable for ${conversation.session.logId}`);
-        transport.send({ type: 'error', code: 'stt_unavailable' });
+        logServerError(this.logger, conversation.session.logId, error);
+        transport.send(toClientError(error, 'stt_unavailable'));
         return;
       }
 
@@ -394,9 +409,9 @@ export class VoiceGateway {
         if (frames > 0) {
           return 'audio';
         }
-      } catch {
+      } catch (error) {
         // Provider detail is logged server-side, never sent to the client.
-        this.logger.warn('Speech synthesis failed, delivering the reply as text');
+        logServerError(this.logger, this.logIdFor(transport), error);
       }
     }
 
@@ -439,10 +454,25 @@ export class VoiceGateway {
         return frames;
       } catch (error) {
         lastError = error;
+        // Bounded and logged: a provider degrading should be visible before it
+        // starts costing callers whole replies.
+        logRetry(this.logger, this.logIdFor(transport), attempt + 1);
       }
     }
 
     throw lastError;
+  }
+
+  /**
+   * The non-secret correlation id for whatever connection this is, or a
+   * placeholder before a session exists. Never the sessionId.
+   */
+  private logIdFor(transport: AudioTransport): string {
+    const state = this.connections.get(transport);
+    if (!state) {
+      return 'no-session';
+    }
+    return this.sessions.get(state.sessionId)?.session.logId ?? 'no-session';
   }
 
   /** One synthesiser per connection, built on the first reply that needs one. */
