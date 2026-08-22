@@ -16,7 +16,7 @@ import {
   STT_MIN_CONFIDENCE,
   LOW_CONFIDENCE_REPROMPT,
 } from '../../src/modules/voice/speech/speech-to-text.interface';
-import { TEXT_TO_SPEECH, TextToSpeech } from '../../src/modules/voice/speech/text-to-speech.interface';
+import { TEXT_TO_SPEECH_FACTORY, TextToSpeech } from '../../src/modules/voice/speech/text-to-speech.interface';
 import { VoiceSessionStore } from '../../src/modules/voice/session/voice-session.store';
 import { VoiceSession } from '../../src/modules/voice/session/voice-session';
 import {
@@ -142,7 +142,7 @@ async function build(options: { withTts?: boolean; startError?: Error } = {}) {
     { provide: ANTHROPIC_CLIENT, useValue: client },
     { provide: SPEECH_TO_TEXT_FACTORY, useValue: sttFactory },
   ];
-  if (options.withTts) providers.push({ provide: TEXT_TO_SPEECH, useValue: tts });
+  if (options.withTts) providers.push({ provide: TEXT_TO_SPEECH_FACTORY, useValue: () => tts });
 
   const moduleRef = await Test.createTestingModule({ providers }).compile();
 
@@ -200,7 +200,9 @@ describe('STT confidence gate', () => {
 
     // The whole point: the model is never asked whether it heard correctly.
     expect(agentCalls).toHaveLength(0);
-    expect(tts.spoken).toEqual([LOW_CONFIDENCE_REPROMPT]);
+    // Spoken a sentence at a time now that replies are chunked, so assert the
+    // caller hears the whole re-prompt rather than counting provider calls.
+    expect(tts.spoken.join(' ')).toBe(LOW_CONFIDENCE_REPROMPT);
   });
 
   it('does not advance the turn counter on a re-prompt', async () => {

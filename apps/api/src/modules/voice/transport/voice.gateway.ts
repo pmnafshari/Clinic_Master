@@ -7,7 +7,12 @@ import {
   SpeechToTextFactory,
   STT_MIN_CONFIDENCE,
 } from '../speech/speech-to-text.interface';
-import { TEXT_TO_SPEECH, TextToSpeech } from '../speech/text-to-speech.interface';
+import {
+  TEXT_TO_SPEECH_FACTORY,
+  TextToSpeech,
+  TextToSpeechFactory,
+} from '../speech/text-to-speech.interface';
+import { chunkSentences } from '../speech/sentence-chunker';
 import { createAnonymousSession } from '../session/voice-session';
 import { Conversation, VoiceSessionStore } from '../session/voice-session.store';
 import { AudioTransport } from './audio-transport.interface';
@@ -28,6 +33,10 @@ interface ConnectionState {
   recentTurnsAt: number[];
   /** Lazily started on the first audio chunk: a text-only session opens no provider stream. */
   stt?: SpeechToText;
+  /** Lazily built on the first reply. One per connection, like the recogniser. */
+  tts?: TextToSpeech;
+  /** Set once when the connection ends, so no frame is emitted afterwards. */
+  ttsCancelled: boolean;
   sttFailed: boolean;
   /** Bytes accepted for the turn in progress. Reset when a turn is dispatched. */
   uplinkBytesThisTurn: number;
@@ -72,7 +81,9 @@ export class VoiceGateway {
      * not permission to fail silently: deliverReply reports which mode it used
      * and the absent case is tested.
      */
-    @Optional() @Inject(TEXT_TO_SPEECH) private readonly tts?: TextToSpeech,
+    @Optional()
+    @Inject(TEXT_TO_SPEECH_FACTORY)
+    private readonly ttsFactory?: TextToSpeechFactory,
     /**
      * A factory, so each connection gets its own recogniser. Optional for the
      * same reason as the speech synthesiser: a deployment with none configured
@@ -118,6 +129,7 @@ export class VoiceGateway {
         recentTurnsAt: [],
         sttFailed: false,
         uplinkBytesThisTurn: 0,
+        ttsCancelled: false,
       });
       this.liveSockets.set(sessionId, transport);
 
@@ -145,6 +157,7 @@ export class VoiceGateway {
         clearTimeout(durationCap);
         this.releaseClaim(transport);
         await this.endRecogniser(transport);
+        this.cancelSpeech(transport);
       });
 
       transport.send({ type: 'session.ready', sessionId });
@@ -363,13 +376,21 @@ export class VoiceGateway {
    * does not add a second path.
    */
   async deliverReply(transport: AudioTransport, text: string): Promise<'audio' | 'text'> {
-    if (this.tts) {
+    const state = this.connections.get(transport);
+    const synth = this.resolveSynthesiser(state);
+
+    if (synth && !state?.ttsCancelled) {
       try {
         let frames = 0;
-        for await (const chunk of this.tts.synthesise(text)) {
-          transport.sendAudio?.(chunk);
-          frames += 1;
+        // Sentence at a time, so the first audio leaves while the rest is
+        // still being generated.
+        for (const sentence of chunkSentences(text)) {
+          if (state?.ttsCancelled) {
+            return 'text';
+          }
+          frames += await this.speakChunk(transport, synth, sentence, state);
         }
+
         if (frames > 0) {
           return 'audio';
         }
@@ -379,9 +400,77 @@ export class VoiceGateway {
       }
     }
 
+    // The connection ended mid-reply. Nothing more is emitted, and no fallback
+    // either: there is nobody left to read it.
+    if (state?.ttsCancelled) {
+      return 'text';
+    }
+
     transport.send({ type: 'reply.text', text });
     transport.send({ type: 'error', code: 'tts_unavailable' });
     return 'text';
+  }
+
+  /**
+   * Speaks one sentence, retrying once.
+   *
+   * A single transient provider failure should not cost the caller the whole
+   * reply; a second means the provider is not going to work this turn, and the
+   * error propagates so the reply is delivered as text instead.
+   */
+  private async speakChunk(
+    transport: AudioTransport,
+    synth: TextToSpeech,
+    sentence: string,
+    state?: ConnectionState
+  ): Promise<number> {
+    let lastError: unknown;
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        let frames = 0;
+        for await (const chunk of synth.synthesise(sentence)) {
+          if (state?.ttsCancelled) {
+            return frames;
+          }
+          transport.sendAudio?.(chunk);
+          frames += 1;
+        }
+        return frames;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    throw lastError;
+  }
+
+  /** One synthesiser per connection, built on the first reply that needs one. */
+  private resolveSynthesiser(state?: ConnectionState): TextToSpeech | undefined {
+    if (!state) {
+      return this.ttsFactory?.();
+    }
+    if (!state.tts) {
+      state.tts = this.ttsFactory?.();
+    }
+    return state.tts;
+  }
+
+  /**
+   * Stops this connection's synthesis. Teardown only — a disconnect, a dropped
+   * client, or the connection duration cap. Never a caller-speech signal:
+   * barge-in is a later phase and reuses this contract unchanged.
+   *
+   * Guarded so a repeated teardown calls cancel() exactly once, and scoped to
+   * one connection so it cannot silence anybody else's call.
+   */
+  private cancelSpeech(transport: AudioTransport): void {
+    const state = this.connections.get(transport);
+    if (!state || state.ttsCancelled) {
+      return;
+    }
+    state.ttsCancelled = true;
+    state.tts?.cancel();
   }
 
   /**

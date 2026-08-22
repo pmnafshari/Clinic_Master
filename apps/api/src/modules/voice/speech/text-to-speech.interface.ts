@@ -1,5 +1,14 @@
-/** DI token so a fake can be substituted without touching the gateway. */
-export const TEXT_TO_SPEECH = Symbol('TEXT_TO_SPEECH');
+/**
+ * DI token for a FACTORY, not an instance.
+ *
+ * A TextToSpeech owns an in-flight request and a cancel signal, so it is
+ * per-connection state — the same lifecycle invariant the speech recogniser
+ * needed. A shared instance would mean one caller hanging up calls cancel()
+ * on every live call at once.
+ */
+export const TEXT_TO_SPEECH_FACTORY = Symbol('TEXT_TO_SPEECH_FACTORY');
+
+export type TextToSpeechFactory = () => TextToSpeech;
 
 /**
  * The seam between a reply and whatever speaks it.
