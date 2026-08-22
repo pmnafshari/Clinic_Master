@@ -20,6 +20,8 @@ import { IdempotencyService } from './idempotency/idempotency.service';
 import { ClaudeAgentService } from './agent/claude.agent';
 import { VoiceController } from './voice.controller';
 import { VoiceSessionStore } from './session/voice-session.store';
+import { VoiceGateway } from './transport/voice.gateway';
+import { VoiceTurnRunner } from './transport/voice-turn-runner';
 import { VOICE_CONFIG, VOICE_FEATURE_FLAG } from './voice.config';
 
 @Module({
@@ -28,6 +30,8 @@ import { VOICE_CONFIG, VOICE_FEATURE_FLAG } from './voice.config';
   providers: [
     ClaudeAgentService,
     VoiceSessionStore,
+    VoiceGateway,
+    VoiceTurnRunner,
     { provide: VOICE_FEATURE_FLAG, useValue: VOICE_CONFIG },
     ToolRegistryService,
     ToolExecutorService,

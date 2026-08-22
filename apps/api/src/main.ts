@@ -3,6 +3,7 @@ import { ValidationPipe, Logger } from '@nestjs/common';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import helmet from 'helmet';
 import { AppModule } from './app.module';
+import { WsAdapter } from '@nestjs/platform-ws';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 
 function assertSecureConfig() {
@@ -22,6 +23,11 @@ async function bootstrap() {
   assertSecureConfig();
 
   const app = await NestFactory.create(AppModule);
+
+  // Raw `ws` rather than Socket.IO: it exposes the HTTP upgrade, which is what
+  // lets an origin check reject a handshake before it becomes a WebSocket.
+  // The origin-checking subclass replaces this adapter when those controls land.
+  app.useWebSocketAdapter(new WsAdapter(app));
 
   app.use(helmet());
   app.useGlobalFilters(new AllExceptionsFilter());
