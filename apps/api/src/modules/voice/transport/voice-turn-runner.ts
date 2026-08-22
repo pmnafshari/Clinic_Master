@@ -54,6 +54,17 @@ export class VoiceTurnRunner {
         // logId, never sessionId: the id is a bearer credential and this line
         // would otherwise put a live one in the log stream.
         this.logger.log(`Rotated session credential for ${conversation.session.logId}`);
+
+        /**
+         * Hand the caller the new credential. This communicates a decision the
+         * store already made — the transport neither rotates nor recomputes
+         * anything, and holds no session state of its own. The frame carries
+         * the id alone: it is a credential handover, not a session dump.
+         *
+         * It travels down the already-established socket that carried the old
+         * id, so no new exposure surface is created.
+         */
+        transport.send({ type: 'session.rotated', sessionId: rotated });
       }
     }
 
