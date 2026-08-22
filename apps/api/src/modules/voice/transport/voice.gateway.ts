@@ -5,6 +5,7 @@ import { Conversation, VoiceSessionStore } from '../session/voice-session.store'
 import { AudioTransport } from './audio-transport.interface';
 import { parseClientFrame } from './frames';
 import {
+  WS_MAX_CONNECTION_MS,
   WS_MAX_TURNS_PER_MINUTE,
   WS_MAX_TURNS_PER_SESSION,
   WS_RATE_WINDOW_MS,
@@ -93,18 +94,29 @@ export class VoiceGateway {
       this.connections.set(transport, { sessionId, turns: 0, recentTurnsAt: [] });
       this.liveSockets.set(sessionId, transport);
 
+      /**
+       * A connection does not live forever, independently of the session it
+       * carries. The session survives its own TTL so the caller can reconnect
+       * and resume; only the socket ends here.
+       *
+       * `rate_limited` rather than `session_expired`: the session is still
+       * there, and telling the client it expired would make it discard a live
+       * conversation and start over.
+       */
+      const logId = this.sessions.get(sessionId)?.session.logId ?? 'unknown';
+      const durationCap = setTimeout(() => {
+        this.logger.warn(`Connection duration cap reached for ${logId}`);
+        transport.close('rate_limited');
+        this.releaseClaim(transport);
+      }, WS_MAX_CONNECTION_MS);
+      // Never hold the process open for a socket that may already be gone.
+      durationCap.unref?.();
+
       // Release the claim however the socket ends — clean close, dropped
-      // client, duration cap. Guarded so a double fire cannot free a slot a
-      // reconnected caller has since taken.
+      // client, duration cap.
       transport.onTeardown(() => {
-        const state = this.connections.get(transport);
-        // Release only a claim this socket still holds. The identity check is
-        // what makes a repeated teardown safe: a dropped client and a clean
-        // close can both fire, and by then the session may belong to a
-        // reconnected socket whose slot must not be freed underneath it.
-        if (state && this.liveSockets.get(state.sessionId) === transport) {
-          this.liveSockets.delete(state.sessionId);
-        }
+        clearTimeout(durationCap);
+        this.releaseClaim(transport);
       });
 
       transport.send({ type: 'session.ready', sessionId });
@@ -139,6 +151,20 @@ export class VoiceGateway {
 
       await this.deliverReply(transport, outcome.reply);
       transport.send({ type: 'turn.complete' });
+    }
+  }
+
+  /**
+   * Gives up this socket's claim on its session, if it still holds one.
+   *
+   * The identity check is what makes a repeated call safe: a duration cap, a
+   * dropped client and a clean close can all fire, and by then the session may
+   * belong to a reconnected socket whose slot must not be freed underneath it.
+   */
+  private releaseClaim(transport: AudioTransport): void {
+    const state = this.connections.get(transport);
+    if (state && this.liveSockets.get(state.sessionId) === transport) {
+      this.liveSockets.delete(state.sessionId);
     }
   }
 

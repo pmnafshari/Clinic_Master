@@ -1,3 +1,5 @@
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import {
   WS_MAX_FRAME_BYTES,
   WS_MAX_TURNS_PER_SESSION,
@@ -45,5 +47,22 @@ describe('websocket limits', () => {
 
   it('sizes one uplink turn well above a single frame', () => {
     expect(WS_MAX_UPLINK_BYTES_PER_TURN).toBeGreaterThan(WS_MAX_FRAME_BYTES);
+  });
+
+  // Declared and pinned, but deliberately not yet enforced: no frame carries
+  // audio, so there is nothing to count. This test records that honestly
+  // rather than letting the constant imply a control that does not exist.
+  it('documents that the uplink cap is not enforced until an audio path exists', () => {
+    const source = readFileSync(
+      join(__dirname, '../../src/modules/voice/transport/transport-limits.ts'),
+      'utf8'
+    );
+    expect(source).toMatch(/DECLARED BUT NOT YET ENFORCED/);
+
+    const gateway = readFileSync(
+      join(__dirname, '../../src/modules/voice/transport/voice.gateway.ts'),
+      'utf8'
+    );
+    expect(gateway).not.toContain('WS_MAX_UPLINK_BYTES_PER_TURN');
   });
 });

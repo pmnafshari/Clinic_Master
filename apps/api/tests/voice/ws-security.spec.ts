@@ -10,6 +10,7 @@ import { VoiceErrorCode } from '../../src/modules/voice/transport/error-codes';
 import {
   WS_MAX_TURNS_PER_SESSION,
   WS_MAX_TURNS_PER_MINUTE,
+  WS_MAX_CONNECTION_MS,
 } from '../../src/modules/voice/transport/transport-limits';
 import { VoiceSessionStore } from '../../src/modules/voice/session/voice-session.store';
 import {
@@ -391,5 +392,144 @@ describe('upgrade-time connection controls', () => {
     expect(verify!({ origin: 'https://clinic.example.com', req })).toBe(true);
     expect(verify!({ origin: 'https://evil.example.com', req })).toBe(false);
     expect(verify!({ origin: undefined, req })).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Connection duration cap. A socket is capped independently of the session it
+// carries: the session survives its own TTL so the caller can reconnect and
+// resume, but the connection does not live forever.
+// ---------------------------------------------------------------------------
+
+describe('connection duration cap', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it('closes an accepted connection once the cap is reached', async () => {
+    const { gateway } = await buildGateway();
+    const transport = new FakeTransport();
+    await gateway.handleFrame(transport, { type: 'session.start' });
+
+    expect(transport.closedWith).toBeNull();
+    jest.advanceTimersByTime(WS_MAX_CONNECTION_MS);
+
+    expect(transport.closedWith).toBe('rate_limited');
+  });
+
+  it('does not close a connection before the cap is reached', async () => {
+    const { gateway } = await buildGateway();
+    const transport = new FakeTransport();
+    await gateway.handleFrame(transport, { type: 'session.start' });
+
+    jest.advanceTimersByTime(WS_MAX_CONNECTION_MS - 1);
+
+    expect(transport.closedWith).toBeNull();
+  });
+
+  it('releases the socket claim so a later connection can use the session', async () => {
+    const { gateway } = await buildGateway();
+    const transport = new FakeTransport();
+    await gateway.handleFrame(transport, { type: 'session.start' });
+    const sessionId = readyId(transport);
+
+    jest.advanceTimersByTime(WS_MAX_CONNECTION_MS);
+
+    const reconnect = new FakeTransport();
+    await gateway.handleFrame(reconnect, { type: 'session.start', sessionId });
+
+    expect(reconnect.closedWith).toBeNull();
+    expect(readyId(reconnect)).toBe(sessionId);
+  });
+
+  it('leaves the session itself alive, so the conversation is not lost', async () => {
+    const { gateway, store } = await buildGateway();
+    const transport = new FakeTransport();
+    await gateway.handleFrame(transport, { type: 'session.start' });
+    const sessionId = readyId(transport);
+    await gateway.handleFrame(transport, { type: 'turn.text', text: 'what are your hours?' });
+
+    jest.advanceTimersByTime(WS_MAX_CONNECTION_MS);
+
+    // The socket ended; the session did not. Closing with session_expired
+    // instead would tell the client to throw the conversation away.
+    expect(store.get(sessionId)).toBeDefined();
+    expect(store.get(sessionId)!.history.length).toBeGreaterThan(0);
+  });
+
+  it('cancels the timer when the client disconnects first', async () => {
+    const { gateway } = await buildGateway();
+    const transport = new FakeTransport();
+    await gateway.handleFrame(transport, { type: 'session.start' });
+
+    await transport.fireTeardown();
+    jest.advanceTimersByTime(WS_MAX_CONNECTION_MS * 2);
+
+    // A fired timer here would call close() on a socket that is already gone,
+    // and would free a slot the caller may have reclaimed.
+    expect(transport.closedWith).toBeNull();
+  });
+
+  it('never gives a rejected duplicate connection a timer or a teardown', async () => {
+    const { gateway } = await buildGateway();
+    const first = new FakeTransport();
+    await gateway.handleFrame(first, { type: 'session.start' });
+    const sessionId = readyId(first);
+
+    const second = new FakeTransport();
+    await gateway.handleFrame(second, { type: 'session.start', sessionId });
+    expect(second.closedWith).toBe('session_conflict');
+    expect(second.registeredTeardowns()).toBe(0);
+
+    jest.advanceTimersByTime(WS_MAX_CONNECTION_MS);
+
+    // The rejected socket's phantom timer must not evict the live socket.
+    expect(first.closedWith).toBe('rate_limited');
+    const stillClaimed = new FakeTransport();
+    await gateway.handleFrame(stillClaimed, { type: 'session.start', sessionId });
+    expect(stillClaimed.closedWith).toBeNull();
+  });
+
+  it('stays idempotent when teardown fires again after the timeout', async () => {
+    const { gateway } = await buildGateway();
+    const timedOut = new FakeTransport();
+    await gateway.handleFrame(timedOut, { type: 'session.start' });
+    const sessionId = readyId(timedOut);
+
+    jest.advanceTimersByTime(WS_MAX_CONNECTION_MS);
+
+    const reconnected = new FakeTransport();
+    await gateway.handleFrame(reconnected, { type: 'session.start', sessionId });
+    expect(reconnected.closedWith).toBeNull();
+
+    // The dead socket's close event finally arrives.
+    await timedOut.fireTeardown();
+    await timedOut.fireTeardown();
+
+    const intruder = new FakeTransport();
+    await gateway.handleFrame(intruder, { type: 'session.start', sessionId });
+    expect(intruder.closedWith).toBe('session_conflict');
+  });
+
+  it('never puts a session id in the duration-cap log line', async () => {
+    const warnings: string[] = [];
+    const spy = jest.spyOn(Logger.prototype, 'warn').mockImplementation((m) => {
+      warnings.push(String(m));
+    });
+
+    const { gateway } = await buildGateway();
+    const transport = new FakeTransport();
+    await gateway.handleFrame(transport, { type: 'session.start' });
+    const sessionId = readyId(transport);
+
+    jest.advanceTimersByTime(WS_MAX_CONNECTION_MS);
+
+    expect(warnings.join('\n')).not.toContain(sessionId);
+    expect(warnings.join('\n')).toMatch(/Connection duration cap reached for [0-9a-f]{16}/);
+    spy.mockRestore();
   });
 });
