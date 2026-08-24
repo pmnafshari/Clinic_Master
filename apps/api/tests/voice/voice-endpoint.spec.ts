@@ -13,6 +13,7 @@ import {
   VoiceController,
 } from '../../src/modules/voice/voice.controller';
 import { VoiceSessionStore } from '../../src/modules/voice/session/voice-session.store';
+import { VoiceTicketService } from '../../src/modules/voice/session/voice-ticket.service';
 import { VoiceTextDto } from '../../src/modules/voice/dto/voice-text.dto';
 import {
   ClaudeAgentService,
@@ -54,6 +55,7 @@ async function buildApp(options: {
     controllers: [VoiceController],
     providers: [
       VoiceSessionStore,
+      VoiceTicketService,
       ToolRegistryService,
       ToolExecutorService,
       ClaudeAgentService,
@@ -314,6 +316,7 @@ describe('POST /api/voice/text — rate limiting', () => {
       controllers: [VoiceController],
       providers: [
       VoiceSessionStore,
+      VoiceTicketService,
         ToolRegistryService,
         ToolExecutorService,
         ClaudeAgentService,
@@ -533,6 +536,7 @@ describe('POST /api/voice/text — history is bounded across a long conversation
       controllers: [VoiceController],
       providers: [
       VoiceSessionStore,
+      VoiceTicketService,
         ToolRegistryService,
         ToolExecutorService,
         ClaudeAgentService,

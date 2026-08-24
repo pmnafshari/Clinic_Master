@@ -6,6 +6,9 @@ import { WebSocket } from 'ws';
 import type { AddressInfo } from 'net';
 
 import { VoiceSocketGateway } from '../../src/modules/voice/transport/voice-socket.gateway';
+import { VerifiedIdentityService } from '../../src/modules/voice/session/verified-identity.service';
+import { VoiceTicketService } from '../../src/modules/voice/session/voice-ticket.service';
+import { PrismaService } from '../../src/prisma/prisma.service';
 import { BrowserWebSocketTransport } from '../../src/modules/voice/transport/browser-websocket.transport';
 import { VoiceGateway } from '../../src/modules/voice/transport/voice.gateway';
 import { VoiceTurnRunner } from '../../src/modules/voice/transport/voice-turn-runner';
@@ -73,6 +76,9 @@ async function startServer(enabled: boolean): Promise<{ app: INestApplication; u
 
   const providers: Provider[] = [
     VoiceSocketGateway,
+    VerifiedIdentityService,
+    VoiceTicketService,
+    { provide: PrismaService, useValue: { patient: { findUnique: async () => null } } },
     VoiceGateway,
     VoiceTurnRunner,
     VoiceSessionStore,

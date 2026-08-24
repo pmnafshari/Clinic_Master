@@ -13,6 +13,7 @@ import { AudioTransport } from '../../src/modules/voice/transport/audio-transpor
 import { ServerFrame } from '../../src/modules/voice/transport/frames';
 import { VoiceErrorCode } from '../../src/modules/voice/transport/error-codes';
 import { VoiceSessionStore } from '../../src/modules/voice/session/voice-session.store';
+import { VoiceTicketService } from '../../src/modules/voice/session/voice-ticket.service';
 import { ToolRegistryService } from '../../src/modules/voice/tools/tool-registry.service';
 import { ToolExecutorService } from '../../src/modules/voice/tools/tool-executor.service';
 import { ANTHROPIC_CLIENT, AnthropicLike } from '../../src/modules/voice/agent/claude.agent';
@@ -187,9 +188,13 @@ describe('nothing in the transport can grant verification', () => {
       .split('\n')
       .filter(Boolean);
 
-    // It is exported from voice-session.ts as the fixture the Phase 0
-    // authorization suite is built on. Nothing else in src/ may call it.
-    expect(hits).toEqual(['apps/api/src/modules/voice/session/voice-session.ts']);
+    // Phase 2 gave it exactly one production caller: the identity path, which
+    // builds a verified session only from a redeemed one-time ticket. Pinned
+    // to that single file so a second call site anywhere else fails here.
+    expect(hits.sort()).toEqual([
+      'apps/api/src/modules/voice/session/voice-session.ts',
+      'apps/api/src/modules/voice/transport/voice.gateway.ts',
+    ]);
   });
 
   it('writes no identity verification flow anywhere in the voice module', () => {

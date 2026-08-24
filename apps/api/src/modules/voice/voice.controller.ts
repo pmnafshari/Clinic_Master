@@ -8,13 +8,17 @@ import {
   NotFoundException,
   Optional,
   Post,
+  Request,
+  UseGuards,
 } from '@nestjs/common';
+import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { ClaudeAgentService } from './agent/claude.agent';
 import { createAnonymousSession } from './session/voice-session';
 import { Conversation, VoiceSessionStore } from './session/voice-session.store';
 import { privilegeChanged, snapshotPrivilege } from './session/privilege-change';
+import { VoiceTicketService } from './session/voice-ticket.service';
 
 import { VoiceTextDto } from './dto/voice-text.dto';
 import { VOICE_CONFIG, VOICE_FEATURE_FLAG, VoiceFeatureFlag } from './voice.config';
@@ -83,6 +87,7 @@ export class VoiceController {
   constructor(
     private agent: ClaudeAgentService,
     private sessions: VoiceSessionStore,
+    private tickets: VoiceTicketService,
     @Optional()
     @Inject(VOICE_FEATURE_FLAG)
     private readonly flag: VoiceFeatureFlag = VOICE_CONFIG
@@ -95,6 +100,40 @@ export class VoiceController {
    * single anonymous IP. Ten turns a minute is more than a person speaking to a
    * receptionist will ever need and takes the worst case down with it.
    */
+  /**
+   * Hands an authenticated patient a one-time key for opening a voice socket.
+   *
+   * A browser cannot set headers on a WebSocket, so the JWT cannot ride the
+   * handshake, and putting it in the query string would write a long-lived
+   * credential into every access log. The ticket is random, single-use and
+   * short-lived, and carries nothing: the userId stays on this side.
+   *
+   * Tighter than the global limit because each ticket is a licence to open an
+   * authenticated socket.
+   */
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
+  @UseGuards(JwtAuthGuard)
+  @Post('ticket')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Issue a one-time ticket for an authenticated voice socket' })
+  @ApiResponse({ status: 200, description: 'The ticket' })
+  @ApiResponse({ status: 401, description: 'Not authenticated' })
+  @ApiResponse({ status: 404, description: 'The voice agent is not enabled' })
+  ticket(@Request() req: { user?: { id: string } }): { ticket: string } {
+    if (!this.flag.enabled) {
+      throw new NotFoundException('Voice agent is not enabled');
+    }
+
+    // The id comes from the validated JWT, never from the request body.
+    const userId = req.user?.id;
+    if (!userId) {
+      throw new NotFoundException('Voice agent is not enabled');
+    }
+
+    // Only the ticket goes back. No userId, no expiry hint, nothing to correlate.
+    return { ticket: this.tickets.issue(userId) };
+  }
+
   @Throttle({ default: { limit: 10, ttl: 60000 } })
   @Post('text')
   @HttpCode(HttpStatus.OK)

@@ -10,6 +10,9 @@ import {
   VOICE_BROWSER_FLAG,
 } from '../../src/modules/voice/voice-browser.config';
 import { VoiceSocketGateway } from '../../src/modules/voice/transport/voice-socket.gateway';
+import { VerifiedIdentityService } from '../../src/modules/voice/session/verified-identity.service';
+import { VoiceTicketService } from '../../src/modules/voice/session/voice-ticket.service';
+import { PrismaService } from '../../src/prisma/prisma.service';
 import { VoiceGateway } from '../../src/modules/voice/transport/voice.gateway';
 import { VoiceTurnRunner } from '../../src/modules/voice/transport/voice-turn-runner';
 import { TransportMetricsService } from '../../src/modules/voice/transport/transport-metrics.service';
@@ -73,6 +76,9 @@ async function startServer(flag?: { browserEnabled: boolean }) {
 
   const providers: Provider[] = [
     VoiceSocketGateway,
+    VerifiedIdentityService,
+    VoiceTicketService,
+    { provide: PrismaService, useValue: { patient: { findUnique: async () => null } } },
     VoiceGateway,
     VoiceTurnRunner,
     VoiceSessionStore,

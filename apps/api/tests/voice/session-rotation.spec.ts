@@ -62,6 +62,7 @@ import { INestApplication, ValidationPipe } from '@nestjs/common';
 import * as request from 'supertest';
 import { VoiceController } from '../../src/modules/voice/voice.controller';
 import { VoiceSessionStore } from '../../src/modules/voice/session/voice-session.store';
+import { VoiceTicketService } from '../../src/modules/voice/session/voice-ticket.service';
 import {
   ClaudeAgentService,
   ANTHROPIC_CLIENT,
@@ -115,6 +116,7 @@ async function buildApp(): Promise<INestApplication> {
     controllers: [VoiceController],
     providers: [
       VoiceSessionStore,
+      VoiceTicketService,
       ToolRegistryService,
       ToolExecutorService,
       ClaudeAgentService,

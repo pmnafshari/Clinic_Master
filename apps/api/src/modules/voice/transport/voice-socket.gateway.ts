@@ -4,6 +4,8 @@ import {
   WebSocketGateway,
 } from '@nestjs/websockets';
 import { WebSocket } from 'ws';
+import type { IncomingMessage } from 'http';
+import { VerifiedIdentityService } from '../session/verified-identity.service';
 import {
   VOICE_BROWSER_CONFIG,
   VOICE_BROWSER_FLAG,
@@ -29,12 +31,13 @@ export class VoiceSocketGateway implements OnGatewayConnection {
 
   constructor(
     private readonly gateway: VoiceGateway,
+    private readonly identity: VerifiedIdentityService,
     @Optional()
     @Inject(VOICE_BROWSER_FLAG)
     private readonly flag: VoiceBrowserFlag = VOICE_BROWSER_CONFIG
   ) {}
 
-  handleConnection(socket: WebSocket): void {
+  handleConnection(socket: WebSocket, request?: IncomingMessage): void {
     /**
      * Default-deny. A deployment that has not switched browser voice on closes
      * the socket immediately rather than serving it: the public surface should
@@ -46,6 +49,16 @@ export class VoiceSocketGateway implements OnGatewayConnection {
     }
 
     const transport = new BrowserWebSocketTransport(socket);
+
+    /**
+     * A browser cannot set headers on a WebSocket, so an authenticated caller
+     * arrives holding a one-time ticket in the handshake URL instead. It is
+     * redeemed here — before any frame is read — and the identity it yields is
+     * handed to the gateway directly. The ticket is never stored, echoed, or
+     * logged, and an absent or spent one simply leaves the socket anonymous,
+     * which is exactly the public widget's behaviour.
+     */
+    void this.bindTicketIdentity(transport, request);
 
     socket.on('message', (data: Buffer, isBinary: boolean) => {
       void this.dispatch(transport, data, isBinary);
@@ -60,6 +73,34 @@ export class VoiceSocketGateway implements OnGatewayConnection {
       // connection is finished either way.
       void transport.runTeardown();
     });
+  }
+
+  private async bindTicketIdentity(
+    transport: BrowserWebSocketTransport,
+    request?: IncomingMessage
+  ): Promise<void> {
+    const ticket = this.ticketFrom(request);
+    if (!ticket) {
+      return;
+    }
+
+    const resolved = await this.identity.resolve(ticket);
+    if (resolved) {
+      this.gateway.bindIdentity(transport, resolved);
+    }
+    // An unknown, expired or already-spent ticket resolves to nothing and the
+    // socket continues anonymously. Rejecting it would tell a caller which
+    // tickets exist, and there is nothing to gain: an anonymous session simply
+    // cannot reach a verified tool.
+  }
+
+  /** Reads the opaque ticket out of the handshake URL. Nothing else is read. */
+  private ticketFrom(request?: IncomingMessage): string | undefined {
+    if (!request?.url) {
+      return undefined;
+    }
+    const value = new URL(request.url, 'http://placeholder').searchParams.get('ticket');
+    return value && value.length > 0 ? value : undefined;
   }
 
   /**

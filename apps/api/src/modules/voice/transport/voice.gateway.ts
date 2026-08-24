@@ -13,7 +13,8 @@ import {
   TextToSpeechFactory,
 } from '../speech/text-to-speech.interface';
 import { chunkSentences } from '../speech/sentence-chunker';
-import { createAnonymousSession } from '../session/voice-session';
+import { createAnonymousSession, createVerifiedSession, newOpaqueId } from '../session/voice-session';
+import { VerifiedIdentity } from '../session/verified-identity.service';
 import { Conversation, VoiceSessionStore } from '../session/voice-session.store';
 import { AudioTransport } from './audio-transport.interface';
 import { parseClientFrame } from './frames';
@@ -39,6 +40,11 @@ interface ConnectionState {
   tts?: TextToSpeech;
   /** Set once when the connection ends, so no frame is emitted afterwards. */
   ttsCancelled: boolean;
+  /**
+   * Resolved from a one-time ticket at connect, before any frame is read.
+   * Absent means the socket is anonymous, which is the Phase 1 behaviour.
+   */
+  identity?: VerifiedIdentity;
   /** Why the socket ended, for the close metric. */
   closeReason: CloseReason;
   sttFailed: boolean;
@@ -76,6 +82,12 @@ export class VoiceGateway {
    */
   private readonly liveSockets = new Map<string, AudioTransport>();
 
+  /**
+   * Identity resolved at connect, held until the session is created. Keyed by
+   * transport so it disappears with the connection.
+   */
+  private readonly pendingIdentity = new WeakMap<AudioTransport, VerifiedIdentity>();
+
   constructor(
     private readonly sessions: VoiceSessionStore,
     private readonly runner: VoiceTurnRunner,
@@ -97,6 +109,17 @@ export class VoiceGateway {
      */
     @Optional() @Inject(SPEECH_TO_TEXT_FACTORY) private readonly sttFactory?: SpeechToTextFactory
   ) {}
+
+  /**
+   * Records the identity a socket authenticated as, before any frame is read.
+   *
+   * Called by the socket gateway once, after it has consumed the ticket. The
+   * identity never comes from a frame, so nothing the browser sends can reach
+   * this.
+   */
+  bindIdentity(transport: AudioTransport, identity: VerifiedIdentity): void {
+    this.pendingIdentity.set(transport, identity);
+  }
 
   async handleFrame(transport: AudioTransport, raw: unknown): Promise<void> {
     try {
@@ -129,7 +152,7 @@ export class VoiceGateway {
     const frame = parsed.frame;
 
     if (frame.type === 'session.start') {
-      const sessionId = this.resume(frame.sessionId);
+      const sessionId = this.resume(frame.sessionId, this.pendingIdentity.get(transport));
 
       /**
        * One live socket per session. A second connection presenting the same
@@ -545,14 +568,23 @@ export class VoiceGateway {
    * gateway into an oracle answering "does this session exist?" one guess at a
    * time — the enumeration attack the HTTP endpoint was written to avoid.
    */
-  private resume(candidate?: string): string {
+  private resume(candidate?: string, identity?: VerifiedIdentity): string {
     const existing = candidate ? this.sessions.get(candidate) : undefined;
     if (existing) {
       return existing.session.sessionId;
     }
 
-    const conversation: Conversation = { session: createAnonymousSession(), history: [] };
-    this.sessions.set(conversation.session.sessionId, conversation);
-    return conversation.session.sessionId;
+    /**
+     * A socket that authenticated at connect starts verified, acting for the
+     * patient linked to that user and no other. Both ids were derived
+     * server-side from a one-time ticket; neither can be named by the browser.
+     */
+    const session = identity
+      ? createVerifiedSession(newOpaqueId(), identity.userId, identity.patientId)
+      : createAnonymousSession();
+
+    const conversation: Conversation = { session, history: [] };
+    this.sessions.set(session.sessionId, conversation);
+    return session.sessionId;
   }
 }
