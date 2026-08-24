@@ -5,6 +5,7 @@ import helmet from 'helmet';
 import { AppModule } from './app.module';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 import { allowedOrigins } from './common/config/allowed-origins';
+import { warnIfMultiInstance } from './common/config/instance-warning';
 import { WsOriginAdapter } from './modules/voice/transport/ws-origin.adapter';
 
 function assertSecureConfig() {
@@ -22,6 +23,7 @@ function assertSecureConfig() {
 
 async function bootstrap() {
   assertSecureConfig();
+  warnIfMultiInstance(new Logger('Bootstrap'));
 
   const app = await NestFactory.create(AppModule);
 

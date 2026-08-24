@@ -23,6 +23,109 @@ The platform covers the full patient journey, replacing phone-based scheduling, 
 
 Access is governed by role-based permissions across five roles: **admin**, **dentist**, **assistant**, **receptionist**, and **patient**.
 
+
+## Voice agent
+
+A caller can ask about the clinic and book an appointment by speaking to an automated
+assistant. It is off by default and has to be switched on deliberately.
+
+### What it can and cannot do
+
+The agent runs at one of two tiers, and only the first is reachable today.
+
+| Tier | Reachable | Tools |
+|---|---|---|
+| **Tier 1 — anonymous** | yes | clinic info, service pricing, availability, patient intake, book appointment |
+| **Tier 2 — verified** | **no** | own appointments, invoices, balance, reschedule, cancel |
+
+Tier 2 needs identity verification, which does not exist yet. Every verified-tier tool
+returns `verification_required`, and a test boots the real module and proves it for each
+one. Nothing in the codebase can set `identityVerified`.
+
+### Running it locally
+
+```bash
+cp .env.example .env          # then fill in the keys below
+docker compose -f docker/docker-compose.yml up -d
+npm run db:migrate && npm run db:seed
+npm run dev
+```
+
+Then set, in `.env`:
+
+```
+VOICE_AGENT_ENABLED=true
+VOICE_BROWSER_ENABLED=true
+NEXT_PUBLIC_VOICE_BROWSER_ENABLED=true
+ANTHROPIC_API_KEY=...
+DEEPGRAM_API_KEY=...        # speech to text
+ELEVENLABS_API_KEY=...      # text to speech
+```
+
+Open <http://localhost:3000/voice>.
+
+**Without the speech keys it still works**, degraded: the recogniser reports
+`stt_unavailable` and replies arrive as text rather than audio. That is a deliberate
+fallback, not a failure — the turn still completes. The Phase 0 text endpoint,
+`POST /api/voice/text`, needs only `ANTHROPIC_API_KEY`.
+
+### Feature flags
+
+| Flag | Default | Effect |
+|---|---|---|
+| `VOICE_AGENT_ENABLED` | `false` | The text endpoint returns 404 when off |
+| `VOICE_BROWSER_ENABLED` | `false` | The `/voice` socket closes immediately when off, issuing no session |
+| `NEXT_PUBLIC_VOICE_BROWSER_ENABLED` | `false` | The public page renders no widget when off |
+
+All three are **default-deny**: absent reads the same as false, and only the exact
+string `true` enables anything.
+
+### Security notes
+
+- **`sessionId` is a bearer credential.** It is server-issued, 256 bits of CSPRNG, never
+  chosen by a client, and never written to a log, metric, error or database row. The
+  non-secret `logId` is the only session identifier in observability output.
+- **It rotates on privilege change.** When intake binds a patient to a session, a fresh
+  id is issued and the old one is destroyed immediately — not left to expire. Idempotency
+  keys derive from a separate nonce, so a retry spanning a rotation still de-duplicates.
+- **An unknown session id is not an error.** It quietly starts a fresh conversation, so
+  the endpoint cannot be used to ask "does this session exist?" one guess at a time.
+- **One live socket per session.** A second connection presenting the same id is rejected;
+  the first is left untouched, so a stolen id cannot kick the real caller off.
+- **Provider credentials stay server-side.** They are never sent to the browser, embedded
+  in a page, or minted into client tokens. The browser talks only to our socket.
+- **The browser never sees a provider error.** Every client-facing failure is one of eight
+  enumerated codes with no provider text, host, port or stack. Real errors are logged
+  server-side against `logId`.
+- **The transport cannot reach a tool.** Every tool call goes through `ToolExecutorService`,
+  which makes the tier decision and writes the audit row — including for blocked calls.
+
+### Single-process constraint
+
+Voice session and idempotency state lives **in process**. Running more than one API
+instance with `VOICE_BROWSER_ENABLED=true` needs sticky routing, or a caller's second turn
+lands in a process that has never heard of their session. `APP_INSTANCES` documents the
+intent; moving this state to Redis is a later phase.
+
+### External provider verification — outstanding
+
+Speech providers are exercised in tests through fakes and through a directly-tested wire
+format. **Neither has been verified against the live service.** Before a staging or
+production deployment, confirm with real credentials:
+
+- **Deepgram** — WebSocket handshake, `Authorization: Token` header, streaming audio in,
+  `CloseStream` on end, and a real utterance producing a transcript.
+- **ElevenLabs** — endpoint path, `xi-api-key` header, request body shape, streaming
+  response, cancellation mid-stream, and the single retry.
+
+Unit and contract coverage is not a substitute for either.
+
+### Not in this phase
+
+Identity verification · authenticated voice sessions · Tier 2 activation · barge-in
+(the `cancel()` contract exists and is used for teardown only) · Redis · telephony ·
+conversation persistence · analytics.
+
 ## Tech stack
 
 | Layer | Technology |
