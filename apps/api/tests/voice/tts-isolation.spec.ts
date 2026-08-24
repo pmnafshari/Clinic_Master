@@ -4,6 +4,7 @@ import { Test } from '@nestjs/testing';
 
 import { VoiceGateway } from '../../src/modules/voice/transport/voice.gateway';
 import { VoiceTurnRunner } from '../../src/modules/voice/transport/voice-turn-runner';
+import { TransportMetricsService } from '../../src/modules/voice/transport/transport-metrics.service';
 import { AudioTransport } from '../../src/modules/voice/transport/audio-transport.interface';
 import { ServerFrame } from '../../src/modules/voice/transport/frames';
 import { VoiceErrorCode } from '../../src/modules/voice/transport/error-codes';
@@ -99,6 +100,7 @@ async function buildHarness() {
   const providers: Provider[] = [
     VoiceGateway,
     VoiceTurnRunner,
+    TransportMetricsService,
     VoiceSessionStore,
     ToolRegistryService,
     ToolExecutorService,

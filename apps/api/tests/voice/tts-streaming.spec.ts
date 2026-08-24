@@ -5,6 +5,7 @@ import { Logger } from '@nestjs/common';
 
 import { VoiceGateway } from '../../src/modules/voice/transport/voice.gateway';
 import { VoiceTurnRunner } from '../../src/modules/voice/transport/voice-turn-runner';
+import { TransportMetricsService } from '../../src/modules/voice/transport/transport-metrics.service';
 import { AudioTransport } from '../../src/modules/voice/transport/audio-transport.interface';
 import { ServerFrame } from '../../src/modules/voice/transport/frames';
 import { VoiceErrorCode } from '../../src/modules/voice/transport/error-codes';
@@ -125,6 +126,7 @@ async function build(mode: Mode | null = 'ok') {
   const providers: Provider[] = [
     VoiceGateway,
     VoiceTurnRunner,
+    TransportMetricsService,
     VoiceSessionStore,
     ToolRegistryService,
     ToolExecutorService,

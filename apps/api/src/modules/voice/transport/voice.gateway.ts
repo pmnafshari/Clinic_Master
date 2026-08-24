@@ -18,6 +18,7 @@ import { Conversation, VoiceSessionStore } from '../session/voice-session.store'
 import { AudioTransport } from './audio-transport.interface';
 import { parseClientFrame } from './frames';
 import { logRetry, logServerError, toClientError } from './error-mapper';
+import { CloseReason, TransportMetricsService } from './transport-metrics.service';
 import {
   WS_MAX_CONNECTION_MS,
   WS_MAX_UPLINK_BYTES_PER_TURN,
@@ -38,6 +39,8 @@ interface ConnectionState {
   tts?: TextToSpeech;
   /** Set once when the connection ends, so no frame is emitted afterwards. */
   ttsCancelled: boolean;
+  /** Why the socket ended, for the close metric. */
+  closeReason: CloseReason;
   sttFailed: boolean;
   /** Bytes accepted for the turn in progress. Reset when a turn is dispatched. */
   uplinkBytesThisTurn: number;
@@ -76,6 +79,7 @@ export class VoiceGateway {
   constructor(
     private readonly sessions: VoiceSessionStore,
     private readonly runner: VoiceTurnRunner,
+    private readonly metrics: TransportMetricsService,
     /**
      * Optional because nothing binds a speech provider yet, and a required
      * injection would leave the app unable to boot until one does. Optional is
@@ -102,6 +106,7 @@ export class VoiceGateway {
       // connection down without ever telling the caller anything, and the
       // provider's own words must not travel in its place.
       const logId = this.logIdFor(transport);
+      this.metrics.providerError(logId, 'agent');
       logServerError(this.logger, logId, error);
       transport.send(toClientError(error, 'agent_unavailable'));
       transport.send({ type: 'turn.complete' });
@@ -139,6 +144,7 @@ export class VoiceGateway {
        * has already learned everything the rejection would tell them.
        */
       if (this.liveSockets.has(sessionId)) {
+        this.metrics.connectionClosed(this.logIdForSession(sessionId), 'session_conflict');
         transport.close('session_conflict');
         return;
       }
@@ -150,6 +156,7 @@ export class VoiceGateway {
         sttFailed: false,
         uplinkBytesThisTurn: 0,
         ttsCancelled: false,
+        closeReason: 'client',
       });
       this.liveSockets.set(sessionId, transport);
 
@@ -164,6 +171,10 @@ export class VoiceGateway {
        */
       const logId = this.sessions.get(sessionId)?.session.logId ?? 'unknown';
       const durationCap = setTimeout(() => {
+        const capped = this.connections.get(transport);
+        if (capped) {
+          capped.closeReason = 'duration_cap';
+        }
         this.logger.warn(`Connection duration cap reached for ${logId}`);
         transport.close('rate_limited');
         this.releaseClaim(transport);
@@ -175,11 +186,16 @@ export class VoiceGateway {
       // client, duration cap.
       transport.onTeardown(async () => {
         clearTimeout(durationCap);
+        this.metrics.connectionClosed(
+          this.logIdFor(transport),
+          this.connections.get(transport)?.closeReason ?? 'client'
+        );
         this.releaseClaim(transport);
         await this.endRecogniser(transport);
         this.cancelSpeech(transport);
       });
 
+      this.metrics.connectionOpened(this.logIdFor(transport));
       transport.send({ type: 'session.ready', sessionId });
       return;
     }
@@ -224,6 +240,7 @@ export class VoiceGateway {
     state.uplinkBytesThisTurn += chunk.length;
     if (state.uplinkBytesThisTurn > WS_MAX_UPLINK_BYTES_PER_TURN) {
       this.logger.warn(`Uplink cap reached for ${conversation.session.logId}`);
+      state.closeReason = 'rate_limited';
       transport.send({ type: 'error', code: 'rate_limited' });
       transport.close('rate_limited');
       return;
@@ -245,6 +262,7 @@ export class VoiceGateway {
         // The provider's message names the provider and often the project, so
         // it is logged here and never sent.
         state.sttFailed = true;
+        this.metrics.providerError(conversation.session.logId, 'stt');
         logServerError(this.logger, conversation.session.logId, error);
         transport.send(toClientError(error, 'stt_unavailable'));
         return;
@@ -285,6 +303,7 @@ export class VoiceGateway {
     }
 
     state.uplinkBytesThisTurn = 0;
+    this.metrics.sttConfidence(this.logIdFor(transport), result.confidence);
 
     if (result.confidence < STT_MIN_CONFIDENCE) {
       // The same delivery path every other reply uses — not a second one.
@@ -324,11 +343,13 @@ export class VoiceGateway {
     }
 
     if (!this.underTurnLimits(state, conversation.session.logId)) {
+      state.closeReason = 'rate_limited';
       transport.send({ type: 'error', code: 'rate_limited' });
       transport.close('rate_limited');
       return;
     }
 
+    const startedAt = Date.now();
     const outcome = await this.runner.runTurn(transport, conversation, text);
 
     // Rotation re-keys the session, so the socket's claim moves with it.
@@ -342,6 +363,7 @@ export class VoiceGateway {
 
     await this.deliverReply(transport, outcome.reply);
     transport.send({ type: 'turn.complete' });
+    this.metrics.turnCompleted(conversation.session.logId, Date.now() - startedAt);
   }
 
   /**
@@ -416,6 +438,7 @@ export class VoiceGateway {
         }
       } catch (error) {
         // Provider detail is logged server-side, never sent to the client.
+        this.metrics.providerError(this.logIdFor(transport), 'tts');
         logServerError(this.logger, this.logIdFor(transport), error);
       }
     }
@@ -449,9 +472,13 @@ export class VoiceGateway {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
         let frames = 0;
+        const requestedAt = Date.now();
         for await (const chunk of synth.synthesise(sentence)) {
           if (state?.ttsCancelled) {
             return frames;
+          }
+          if (frames === 0) {
+            this.metrics.ttsFirstFrame(this.logIdFor(transport), Date.now() - requestedAt);
           }
           transport.sendAudio?.(chunk);
           frames += 1;
@@ -477,7 +504,11 @@ export class VoiceGateway {
     if (!state) {
       return 'no-session';
     }
-    return this.sessions.get(state.sessionId)?.session.logId ?? 'no-session';
+    return this.logIdForSession(state.sessionId);
+  }
+
+  private logIdForSession(sessionId: string): string {
+    return this.sessions.get(sessionId)?.session.logId ?? 'no-session';
   }
 
   /** One synthesiser per connection, built on the first reply that needs one. */

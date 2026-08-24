@@ -4,6 +4,7 @@ import { privilegeChanged, snapshotPrivilege } from '../session/privilege-change
 import { Conversation, VoiceSessionStore } from '../session/voice-session.store';
 import { trimHistory } from '../voice.controller';
 import { AudioTransport } from './audio-transport.interface';
+import { TransportMetricsService } from './transport-metrics.service';
 
 /** What one turn produced, for the gateway to deliver. */
 export interface TurnOutcome {
@@ -24,7 +25,8 @@ export class VoiceTurnRunner {
 
   constructor(
     private readonly agent: ClaudeAgentService,
-    private readonly sessions: VoiceSessionStore
+    private readonly sessions: VoiceSessionStore,
+    private readonly metrics: TransportMetricsService
   ) {}
 
   async runTurn(
@@ -53,6 +55,7 @@ export class VoiceTurnRunner {
         sessionId = rotated;
         // logId, never sessionId: the id is a bearer credential and this line
         // would otherwise put a live one in the log stream.
+        this.metrics.sessionRotated(conversation.session.logId);
         this.logger.log(`Rotated session credential for ${conversation.session.logId}`);
 
         /**

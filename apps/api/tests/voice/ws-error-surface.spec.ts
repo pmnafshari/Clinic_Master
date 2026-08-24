@@ -7,6 +7,7 @@ import { join } from 'path';
 
 import { VoiceGateway } from '../../src/modules/voice/transport/voice.gateway';
 import { VoiceTurnRunner } from '../../src/modules/voice/transport/voice-turn-runner';
+import { TransportMetricsService } from '../../src/modules/voice/transport/transport-metrics.service';
 import { AudioTransport } from '../../src/modules/voice/transport/audio-transport.interface';
 import { ServerFrame } from '../../src/modules/voice/transport/frames';
 import {
@@ -72,6 +73,7 @@ async function buildGatewayThatThrows(error: unknown) {
   const providers: Provider[] = [
     VoiceGateway,
     VoiceTurnRunner,
+    TransportMetricsService,
     VoiceSessionStore,
     ToolRegistryService,
     ToolExecutorService,
@@ -100,6 +102,7 @@ async function buildGatewayWithThrowingRunner(error: unknown) {
     providers: [
       VoiceGateway,
       VoiceSessionStore,
+      TransportMetricsService,
       ToolRegistryService,
       ToolExecutorService,
       ClaudeAgentService,
@@ -136,6 +139,7 @@ async function buildGatewayWithFailingStt(error: unknown) {
     providers: [
       VoiceGateway,
       VoiceTurnRunner,
+      TransportMetricsService,
       VoiceSessionStore,
       ToolRegistryService,
       ToolExecutorService,
@@ -189,6 +193,7 @@ async function buildGatewayWithThrowingTts(error: unknown) {
     providers: [
       VoiceGateway,
       VoiceTurnRunner,
+      TransportMetricsService,
       VoiceSessionStore,
       ToolRegistryService,
       ToolExecutorService,
