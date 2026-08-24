@@ -2759,7 +2759,29 @@ git commit -m "feat(voice): enumerate every client-facing websocket error"
 
 **Dependencies:** T3, T4, T5, T7.
 
+> **Scope correction, 2026-08-24 (found in T6 pre-flight).** Two prerequisites belonged to no
+> completed task and are folded in here. See the spec's §14 amendment for why each was missed.
+>
+> **(a) The production WebSocket endpoint.** No `@WebSocketGateway` exists and no class implements
+> `AudioTransport`; `handleFrame`/`handleAudio` have no production caller. T2's acceptance was
+> satisfiable without them, so nothing caught the absence. T6 adds the **thin bridge only**: a
+> gateway endpoint, and a `BrowserWebSocketTransport` routing text→`handleFrame`,
+> binary→`handleAudio`, close→teardown. It reuses `WsOriginAdapter`, the rate limits,
+> one-socket-per-session, the duration cap, claim release and anti-enumeration **unchanged**, and
+> creates no second turn runner, dispatch path, session store or security path. No T3/T4/T5/T7
+> logic moves into it.
+>
+> **(b) `VOICE_BROWSER_ENABLED` runtime enforcement.** The flag does not exist and T6 does not
+> depend on T10, so T6 as written would mount a public unauthenticated route ungated. T6 takes the
+> configuration definition, default-deny behaviour and exposure gating only. **T10 keeps
+> `.env.example`, the README, the `APP_INSTANCES` warning and the final flags audit.**
+
 **Files:**
+- Create: `apps/api/src/modules/voice/transport/browser-websocket.transport.ts` *(correction a)*
+- Create: `apps/api/src/modules/voice/transport/voice-socket.gateway.ts` *(correction a)*
+- Create: `apps/api/src/modules/voice/voice-browser.config.ts` *(correction b)*
+- Test: `apps/api/tests/voice/browser-socket.spec.ts` *(correction a — real bound socket)*
+- Test: `apps/api/tests/voice/browser-flag.spec.ts` *(correction b — default-deny)*
 - Create: `apps/web/src/app/(public)/layout.tsx`
 - Create: `apps/web/src/app/(public)/voice/page.tsx`
 - Create: `apps/web/src/components/voice/voice-widget.tsx`

@@ -702,6 +702,34 @@ depends only on T2. Resolved by moving the **interface and DI token only** into 
 ElevenLabs implementation wholly in T5. The dependency graph is unchanged — T4 still depends on T2
 alone, and T4/T5 remain parallel siblings. No task was added, removed, merged, split or reordered.
 
+**Amendment, 2026-08-24 (T6 pre-flight — dependency/scope correction).** Two prerequisites
+for T6 turned out to belong to no completed task. Recorded here as a correction found during
+review, not rewritten into earlier history.
+
+*The production `BrowserWebSocketTransport` was missing.* §2.7 assigns it to Phase 1 and the plan's
+file table maps it onto `voice.gateway.ts`, but T2's acceptance criteria covered the frame schemas,
+the validation rules, the `turn.text` control frame and the import-graph test — **none of which
+require a bound socket**. `VoiceGateway` was therefore built as a plain `@Injectable` whose
+`handleFrame`/`handleAudio` are called only by tests, no class implements `AudioTransport`, and no
+`@WebSocketGateway` exists anywhere. Every T2–T9 guarantee is real but has only ever been exercised
+through test doubles: real message framing, real close→teardown, and `verifyClient` have never run.
+T2's acceptance was satisfiable without the class, so nothing caught its absence.
+
+*It is completed in T6* because T6 is where it is first needed — T6's acceptance is an end-to-end
+anonymous intake→book by voice, which is unreachable without it — and because folding it in keeps
+the approved dependency graph and task count unchanged. It is a **thin adapter only**: text message
+to the existing `handleFrame`, binary to the existing `handleAudio`, close to the existing teardown.
+No second turn runner, dispatch path, session store or security path; no T3/T4/T5/T7 logic moves
+into it.
+
+*`VOICE_BROWSER_ENABLED` runtime enforcement moves to T6* because T6 mounts the first public,
+unauthenticated surface and T6 does not depend on T10 — implementing T6 as originally written would
+expose that surface with no flag gating it at all, the opposite of default-deny. Only the
+configuration definition, the default-deny behaviour and the exposure gating move. **T10 keeps all
+documentation scope**: `.env.example`, the README section, the `APP_INSTANCES` single-process
+warning, and the final flags audit. This mirrors the earlier `TextToSpeech` correction, where the
+declaration moved and the implementation stayed put.
+
 **Amendment, 2026-08-20 (optional-injection review).** Optional injection of `TEXT_TO_SPEECH` is
 kept — it is what lets T2 and T5 land independently — but it is no longer allowed to be a silent
 production failure path. §4 now defines a single `deliverReply` returning `'audio' | 'text'`, §6's
