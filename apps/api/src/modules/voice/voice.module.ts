@@ -19,6 +19,16 @@ import { CancelAppointmentTool } from './tools/cancel-appointment.tool';
 import { IdempotencyService } from './idempotency/idempotency.service';
 import { ClaudeAgentService } from './agent/claude.agent';
 import { VoiceController } from './voice.controller';
+import { VoiceSessionStore } from './session/voice-session.store';
+import { VoiceGateway } from './transport/voice.gateway';
+import { VoiceTurnRunner } from './transport/voice-turn-runner';
+import { TransportMetricsService } from './transport/transport-metrics.service';
+import { VoiceSocketGateway } from './transport/voice-socket.gateway';
+import { VOICE_BROWSER_CONFIG, VOICE_BROWSER_FLAG } from './voice-browser.config';
+import { SPEECH_TO_TEXT_FACTORY } from './speech/speech-to-text.interface';
+import { DeepgramSttService } from './speech/deepgram-stt.service';
+import { TEXT_TO_SPEECH_FACTORY } from './speech/text-to-speech.interface';
+import { ElevenLabsTtsService } from './speech/elevenlabs-tts.service';
 import { VOICE_CONFIG, VOICE_FEATURE_FLAG } from './voice.config';
 
 @Module({
@@ -26,6 +36,18 @@ import { VOICE_CONFIG, VOICE_FEATURE_FLAG } from './voice.config';
   controllers: [VoiceController],
   providers: [
     ClaudeAgentService,
+    VoiceSessionStore,
+    VoiceGateway,
+    VoiceTurnRunner,
+    TransportMetricsService,
+    VoiceSocketGateway,
+    { provide: VOICE_BROWSER_FLAG, useValue: VOICE_BROWSER_CONFIG },
+    // A new recogniser per connection — see SPEECH_TO_TEXT_FACTORY. Binding
+    // the class directly would hand every concurrent caller the same socket.
+    { provide: SPEECH_TO_TEXT_FACTORY, useValue: () => new DeepgramSttService() },
+    // Same lifecycle: one synthesiser per connection, so one caller hanging up
+    // cannot cancel everybody else's audio.
+    { provide: TEXT_TO_SPEECH_FACTORY, useValue: () => new ElevenLabsTtsService() },
     { provide: VOICE_FEATURE_FLAG, useValue: VOICE_CONFIG },
     ToolRegistryService,
     ToolExecutorService,
@@ -41,7 +63,7 @@ import { VOICE_CONFIG, VOICE_FEATURE_FLAG } from './voice.config';
     CancelAppointmentTool,
     IdempotencyService,
   ],
-  exports: [ToolRegistryService, ToolExecutorService],
+  exports: [ToolRegistryService, ToolExecutorService, VoiceSessionStore],
 })
 export class VoiceModule implements OnModuleInit {
   constructor(

@@ -4,6 +4,9 @@ import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import helmet from 'helmet';
 import { AppModule } from './app.module';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
+import { allowedOrigins } from './common/config/allowed-origins';
+import { warnIfMultiInstance } from './common/config/instance-warning';
+import { WsOriginAdapter } from './modules/voice/transport/ws-origin.adapter';
 
 function assertSecureConfig() {
   const nodeEnv = process.env.NODE_ENV || 'development';
@@ -20,16 +23,24 @@ function assertSecureConfig() {
 
 async function bootstrap() {
   assertSecureConfig();
+  warnIfMultiInstance(new Logger('Bootstrap'));
 
   const app = await NestFactory.create(AppModule);
+
+  // Raw `ws` rather than Socket.IO: it exposes the HTTP upgrade, which is what
+  // lets the origin and per-IP checks reject a handshake before it becomes a
+  // WebSocket at all.
+  app.useWebSocketAdapter(new WsOriginAdapter(app));
 
   app.use(helmet());
   app.useGlobalFilters(new AllExceptionsFilter());
 
   app.setGlobalPrefix('api');
 
+  // Same allowlist the WebSocket upgrade uses. CORS does not cover WebSocket
+  // handshakes, and two lists would drift apart.
   app.enableCors({
-    origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+    origin: allowedOrigins(),
     credentials: true,
   });
 

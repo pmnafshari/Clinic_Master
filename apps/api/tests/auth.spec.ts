@@ -2,6 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import * as request from 'supertest';
 import { AppModule } from '../src/app.module';
+import { WsOriginAdapter } from '../src/modules/voice/transport/ws-origin.adapter';
 
 describe('Auth (e2e)', () => {
   let app: INestApplication;
@@ -12,6 +13,9 @@ describe('Auth (e2e)', () => {
     }).compile();
 
     app = moduleFixture.createNestApplication();
+    // The voice module now registers a WebSocket gateway, so an adapter is
+    // required before init — exactly as main.ts does it.
+    app.useWebSocketAdapter(new WsOriginAdapter(app));
     app.setGlobalPrefix('api');
     app.useGlobalPipes(
       new ValidationPipe({
