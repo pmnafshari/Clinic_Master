@@ -8,8 +8,12 @@ const SOCKET_URL =
 
 type MicState = 'idle' | 'requesting' | 'denied' | 'capturing';
 
-export function VoiceWidget() {
-  const { state, connect, sendText, sendAudio, endAudio, disconnect } = useVoiceSocket(SOCKET_URL);
+export function VoiceWidget({ socketUrl }: { socketUrl?: string } = {}) {
+  // The public page uses the anonymous default; the portal passes a ticketed
+  // url. Nothing else differs between the two surfaces.
+  const { state, connect, sendText, sendAudio, endAudio, disconnect } = useVoiceSocket(
+    socketUrl ?? SOCKET_URL
+  );
   const [mic, setMic] = useState<MicState>('idle');
   const [typed, setTyped] = useState('');
   const streamRef = useRef<MediaStream | null>(null);

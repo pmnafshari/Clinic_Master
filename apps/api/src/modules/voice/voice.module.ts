@@ -1,4 +1,5 @@
 import { Module, OnModuleInit } from '@nestjs/common';
+import { PrismaModule } from '../../prisma/prisma.module';
 import { AppointmentsModule } from '../appointments/appointments.module';
 import { PatientsModule } from '../patients/patients.module';
 import { UsersModule } from '../users/users.module';
@@ -20,6 +21,8 @@ import { IdempotencyService } from './idempotency/idempotency.service';
 import { ClaudeAgentService } from './agent/claude.agent';
 import { VoiceController } from './voice.controller';
 import { VoiceSessionStore } from './session/voice-session.store';
+import { VoiceTicketService } from './session/voice-ticket.service';
+import { VerifiedIdentityService } from './session/verified-identity.service';
 import { VoiceGateway } from './transport/voice.gateway';
 import { VoiceTurnRunner } from './transport/voice-turn-runner';
 import { TransportMetricsService } from './transport/transport-metrics.service';
@@ -32,11 +35,13 @@ import { ElevenLabsTtsService } from './speech/elevenlabs-tts.service';
 import { VOICE_CONFIG, VOICE_FEATURE_FLAG } from './voice.config';
 
 @Module({
-  imports: [AppointmentsModule, UsersModule, BillingModule, PatientsModule, AuditModule],
+  imports: [PrismaModule, AppointmentsModule, UsersModule, BillingModule, PatientsModule, AuditModule],
   controllers: [VoiceController],
   providers: [
     ClaudeAgentService,
     VoiceSessionStore,
+    VoiceTicketService,
+    VerifiedIdentityService,
     VoiceGateway,
     VoiceTurnRunner,
     TransportMetricsService,

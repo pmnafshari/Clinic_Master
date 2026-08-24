@@ -1,3 +1,4 @@
+import { VoiceTicketService } from '../../src/modules/voice/session/voice-ticket.service';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 
@@ -14,6 +15,7 @@ import { UsersService } from '../../src/modules/users/users.service';
 import { ToolRegistryService } from '../../src/modules/voice/tools/tool-registry.service';
 import { ToolExecutorService } from '../../src/modules/voice/tools/tool-executor.service';
 import { AuditService } from '../../src/modules/audit/audit.service';
+import { PrismaService } from '../../src/prisma/prisma.service';
 import {
   VoiceTool,
   VoiceToolResult,
@@ -225,6 +227,11 @@ async function bootVoiceModule(): Promise<Booted> {
   const model = scriptedModel();
 
   const moduleRef = await Test.createTestingModule({ imports: [VoiceModule] })
+    // Identity binding reads Patient.userId, so VoiceModule now pulls in
+    // Prisma. This suite never touches a database, so the client is stubbed
+    // rather than connected.
+    .overrideProvider(PrismaService)
+    .useValue({ patient: { findUnique: async () => null } })
     .overrideProvider(AppointmentsService)
     .useValue(mocks.appointments)
     .overrideProvider(BillingService)
