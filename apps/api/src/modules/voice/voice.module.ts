@@ -23,6 +23,8 @@ import { VoiceSessionStore } from './session/voice-session.store';
 import { VoiceGateway } from './transport/voice.gateway';
 import { VoiceTurnRunner } from './transport/voice-turn-runner';
 import { TransportMetricsService } from './transport/transport-metrics.service';
+import { VoiceSocketGateway } from './transport/voice-socket.gateway';
+import { VOICE_BROWSER_CONFIG, VOICE_BROWSER_FLAG } from './voice-browser.config';
 import { SPEECH_TO_TEXT_FACTORY } from './speech/speech-to-text.interface';
 import { DeepgramSttService } from './speech/deepgram-stt.service';
 import { TEXT_TO_SPEECH_FACTORY } from './speech/text-to-speech.interface';
@@ -38,6 +40,8 @@ import { VOICE_CONFIG, VOICE_FEATURE_FLAG } from './voice.config';
     VoiceGateway,
     VoiceTurnRunner,
     TransportMetricsService,
+    VoiceSocketGateway,
+    { provide: VOICE_BROWSER_FLAG, useValue: VOICE_BROWSER_CONFIG },
     // A new recogniser per connection — see SPEECH_TO_TEXT_FACTORY. Binding
     // the class directly would hand every concurrent caller the same socket.
     { provide: SPEECH_TO_TEXT_FACTORY, useValue: () => new DeepgramSttService() },
