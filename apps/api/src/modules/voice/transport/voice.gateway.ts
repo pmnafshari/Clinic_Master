@@ -112,7 +112,12 @@ export class VoiceGateway {
     const parsed = parseClientFrame(raw);
 
     if (!parsed.ok) {
-      transport.send({ type: 'error', code: parsed.code });
+      // Written as a literal rather than forwarding `parsed.code`: every
+      // direct error send states a closed, server-defined code at the call
+      // site, so a reader can see what the browser is told without following
+      // a value. Anything derived from a caught exception goes through
+      // toClientError instead.
+      transport.send({ type: 'error', code: 'bad_frame' });
       return;
     }
 

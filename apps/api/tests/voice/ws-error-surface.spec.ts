@@ -2,7 +2,7 @@ import type Anthropic from '@anthropic-ai/sdk';
 import type { Provider } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { Logger } from '@nestjs/common';
-import { readFileSync } from 'fs';
+import { readFileSync, readdirSync } from 'fs';
 import { join } from 'path';
 
 import { VoiceGateway } from '../../src/modules/voice/transport/voice.gateway';
@@ -391,5 +391,93 @@ describe('the global HTTP filter is left alone', () => {
       'utf8'
     );
     expect(source).toContain('exception.message');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The error boundary has two lanes, and they must not blur:
+//
+//   1. Direct `type: 'error'` sends carry a CLOSED, server-defined literal
+//      code derived from protocol state (a malformed frame, an expired
+//      session, a limit reached). These hold no error object, so there is
+//      nothing to leak.
+//   2. Anything derived from a caught exception or a provider must pass
+//      through toClientError(), which never reads the error.
+//
+// A caught exception reaching lane 1 is how provider text starts leaking, so
+// the distinction is enforced statically rather than trusted.
+// ---------------------------------------------------------------------------
+
+const TRANSPORT_DIR = join(__dirname, '../../src/modules/voice/transport');
+
+/** Extracts each catch block's body by brace matching. */
+function catchBodies(source: string): string[] {
+  const bodies: string[] = [];
+  const pattern = /catch\s*(?:\([^)]*\))?\s*\{/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = pattern.exec(source)) !== null) {
+    let depth = 1;
+    let i = match.index + match[0].length;
+    const start = i;
+    while (i < source.length && depth > 0) {
+      if (source[i] === '{') depth += 1;
+      if (source[i] === '}') depth -= 1;
+      i += 1;
+    }
+    bodies.push(source.slice(start, i - 1));
+  }
+
+  return bodies;
+}
+
+function stripComments(source: string): string {
+  return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+}
+
+describe('the error boundary keeps its two lanes separate', () => {
+  const files = readdirSync(TRANSPORT_DIR).filter((f) => f.endsWith('.ts'));
+
+  it('has transport files to check', () => {
+    // A sweep over an empty directory passes for the wrong reason.
+    expect(files.length).toBeGreaterThanOrEqual(6);
+  });
+
+  it.each(files)('%s: every direct error send uses a closed literal code', (file) => {
+    const source = stripComments(readFileSync(join(TRANSPORT_DIR, file), 'utf8'));
+    const sends = [...source.matchAll(/type:\s*'error'\s*,\s*code:\s*([^\s,}]+)/g)];
+
+    for (const [, code] of sends) {
+      // A quoted literal, and one the enumeration actually declares.
+      expect(code).toMatch(/^'[a-z_]+'$/);
+      expect(VOICE_ERROR_CODES).toContain(code.slice(1, -1) as VoiceErrorCode);
+    }
+  });
+
+  it.each(files)('%s: no catch block builds an error frame by hand', (file) => {
+    const source = stripComments(readFileSync(join(TRANSPORT_DIR, file), 'utf8'));
+
+    for (const body of catchBodies(source)) {
+      // Inside a catch there is an error object in scope, so a hand-built
+      // frame is exactly where provider text starts riding along. The mapper
+      // is the only sanctioned way out.
+      expect(body).not.toMatch(/type:\s*'error'/);
+    }
+  });
+
+  it('the mapper is the only thing that ever receives an error object', () => {
+    const source = stripComments(readFileSync(join(TRANSPORT_DIR, 'voice.gateway.ts'), 'utf8'));
+
+    for (const body of catchBodies(source)) {
+      if (!/\berror\b/.test(body)) {
+        continue;
+      }
+      // A catch that names its error must hand it to the mapper, the logger,
+      // or rethrow it — never to transport.send.
+      const usesSanctioned =
+        /toClientError\(/.test(body) || /logServerError\(/.test(body) || /logRetry\(/.test(body) ||
+        /lastError\s*=\s*error/.test(body);
+      expect(usesSanctioned).toBe(true);
+    }
   });
 });
