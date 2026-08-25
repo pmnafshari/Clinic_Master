@@ -260,10 +260,45 @@ Phase 1 ships single-process. The constraint is documented and warned about at s
 | Idempotency `completed` | `BoundedTtlMap` | Redis, TTL 15 min | `SET NX EX` — the winner executes |
 | Idempotency `inFlight` | in-process promise map | Redis lock | `SET NX EX` with a short lease; losers poll for the result |
 
-**The `IdempotencyService` and `VoiceSessionStore` interfaces do not change** at cut-over —
-`keyFor`, `runOnce`, `get`, `set`, `delete`, `rekey` keep their signatures; only the backing store
-swaps. Extracting `VoiceSessionStore` in T0 is what makes that swap a one-file change. No second
-state mechanism is introduced.
+**Amended 2026-08-24, at the cut-over.** This section previously claimed that `keyFor`, `runOnce`,
+`get`, `set`, `delete` and `rekey` would all keep their signatures. **That was wrong for the session
+store**, and the error was only visible once T0 had built it: `VoiceSessionStore` is entirely
+synchronous, and there is no synchronous Redis client for Node. `get(id): Conversation | undefined`
+cannot be satisfied by a network round trip.
+
+What actually holds:
+
+- **`IdempotencyService` is unchanged.** `runOnce` was already `async`, and `keyFor` is pure
+  computation with no I/O. Only its two private fields move to Redis.
+- **`VoiceSessionStore` becomes asynchronous.** `get`, `set`, `delete`, `rekey` and `rotate` return
+  promises; `size` becomes `count()`. Twelve call sites in the controller, the turn runner and the
+  gateway gain an `await`. The change is mechanical and the compiler finds every site — no
+  behaviour, ordering or security semantics change with it.
+
+The alternative — a synchronous in-process cache in front of Redis — was rejected: a read on the
+second instance would miss the first instance's session, which is the exact failure this migration
+exists to remove, while appearing to work.
+
+**The in-process entry-count caps no longer exist.** `MAX_ACTIVE_SESSIONS` (1000) and
+`IDEMPOTENCY_MAX_ENTRIES` (5000) capped `BoundedTtlMap`; Redis has no equivalent, so the
+resource boundary is now `maxmemory` plus `volatile-lru`, configured on the server. A TTL
+alone is insufficient — it bounds how long a key lives, not how many exist at once, and
+session keys are created from caller traffic.
+
+Three Phase 0 tests asserted that in-process eviction specifically — that the map never
+exceeded the cap, that it evicted oldest-first, and that it accepted an injected clock.
+Those mechanisms are gone, so the tests were replaced rather than deleted: Redis-backed
+tests now assert that every cached result has a finite TTL, that no key is left without an
+expiry for an attacker to accumulate, and that the server is actually running the eviction
+policy rather than `noeviction`. A fourth Phase 0 test forced eviction by flooding the
+store past the cap; it now expires the session directly, and its assertions are unchanged.
+
+Request coalescing is retained: two callers arriving in the same process on the same key
+still share one execution and one outcome, a rejection included. That map holds only
+active, unsettled promises and is cleared on settlement — it is not a cache, and Redis
+remains the only shared coordination point.
+
+No second state mechanism is introduced.
 
 ### 2.10 One origin allowlist, not two
 

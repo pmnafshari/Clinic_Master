@@ -1,13 +1,22 @@
 import type Anthropic from '@anthropic-ai/sdk';
-import { Inject, Injectable, Optional } from '@nestjs/common';
-import { BoundedTtlMap, Clock, VOICE_CLOCK } from '../util/bounded-ttl-map';
+import { Inject, Injectable } from '@nestjs/common';
+import { Redis } from 'ioredis';
+import { VOICE_REDIS } from './redis.provider';
 import { newOpaqueId, VoiceSession } from './voice-session';
 
 /** A quiet conversation is dropped well before a real caller would return. */
 export const SESSION_TTL_MS = 30 * 60 * 1000;
+const SESSION_TTL_SECONDS = SESSION_TTL_MS / 1000;
 
-/** Hard ceiling on concurrently tracked conversations. */
+/**
+ * Kept for the startup warning and for callers that still reference it. Redis
+ * bounds the namespace by TTL rather than by count, so nothing enforces this
+ * as a hard ceiling any more.
+ */
 export const MAX_ACTIVE_SESSIONS = 1000;
+
+const KEY_PREFIX = 'voice:session:';
+const key = (sessionId: string): string => `${KEY_PREFIX}${sessionId}`;
 
 export interface Conversation {
   session: VoiceSession;
@@ -15,58 +24,56 @@ export interface Conversation {
 }
 
 /**
- * The single home for conversation state.
+ * The single home for conversation state, shared by every API instance.
  *
- * This used to be a private field on VoiceController. It moved out because
- * Phase 1 adds a second transport: a WebSocket gateway cannot reach a
- * controller's private map, and two stores would mean a caller's second turn
- * could land in a map that has never heard of their session.
- *
- * Keeping it behind one class is also what makes the Redis swap a one-file
- * change if the process ever needs to scale horizontally.
+ * Every method is asynchronous because Redis is. The interface was synchronous
+ * while the backing store was an in-process map; there is no synchronous Redis
+ * client, and a memory cache in front of one would let a caller's second turn
+ * land on an instance that has never heard of them — the exact failure this
+ * store exists to remove. See the design doc, section 2.9.
  */
 @Injectable()
 export class VoiceSessionStore {
-  private readonly conversations: BoundedTtlMap<Conversation>;
+  constructor(@Inject(VOICE_REDIS) private readonly redis: Redis) {}
 
-  constructor(@Optional() @Inject(VOICE_CLOCK) clock?: Clock) {
-    this.conversations = new BoundedTtlMap<Conversation>(
-      MAX_ACTIVE_SESSIONS,
-      SESSION_TTL_MS,
-      clock ?? (() => Date.now())
-    );
-  }
-
-  get size(): number {
-    return this.conversations.size;
-  }
-
-  get(sessionId: string): Conversation | undefined {
-    return this.conversations.get(sessionId);
-  }
-
-  set(sessionId: string, conversation: Conversation): void {
-    this.conversations.set(sessionId, conversation);
-  }
-
-  delete(sessionId: string): void {
-    this.conversations.delete(sessionId);
+  async get(sessionId: string): Promise<Conversation | undefined> {
+    const raw = await this.redis.get(key(sessionId));
+    if (!raw) {
+      return undefined;
+    }
+    return JSON.parse(raw) as Conversation;
   }
 
   /**
-   * Moves a conversation to a new key. The write lands before the delete, so
-   * there is no instant where the conversation is reachable under neither id.
-   * Node runs this synchronously, which is what makes it atomic here.
+   * Writes the conversation and refreshes its lifetime.
+   *
+   * Called on every turn, so an active caller is not dropped mid-booking while
+   * a quiet one ages out.
    */
-  rekey(oldId: string, newId: string): boolean {
-    const conversation = this.conversations.get(oldId);
-    if (!conversation) {
+  async set(sessionId: string, conversation: Conversation): Promise<void> {
+    await this.redis.set(key(sessionId), JSON.stringify(conversation), 'EX', SESSION_TTL_SECONDS);
+  }
+
+  async delete(sessionId: string): Promise<void> {
+    await this.redis.del(key(sessionId));
+  }
+
+  /**
+   * Moves a conversation to a new key.
+   *
+   * `RENAME` and nothing else: it is atomic, it moves the value, it removes the
+   * source key by definition, and it carries the remaining TTL across. A
+   * `SET` + `DEL` pair would restart the clock and open a window where the
+   * conversation is reachable under both ids or neither.
+   */
+  async rekey(oldId: string, newId: string): Promise<boolean> {
+    try {
+      await this.redis.rename(key(oldId), key(newId));
+      return true;
+    } catch {
+      // RENAME on a missing key is an error, not a silent no-op.
       return false;
     }
-
-    this.conversations.set(newId, conversation);
-    this.conversations.delete(oldId);
-    return true;
   }
 
   /**
@@ -78,15 +85,35 @@ export class VoiceSessionStore {
    * and the turn index, so regenerating either would open a fresh replay
    * namespace and let a retry that spans a rotation execute a write twice.
    */
-  rotate(oldId: string): string | undefined {
-    const conversation = this.conversations.get(oldId);
+  async rotate(oldId: string): Promise<string | undefined> {
+    const conversation = await this.get(oldId);
     if (!conversation) {
       return undefined;
     }
 
     const newId = newOpaqueId();
     conversation.session.sessionId = newId;
-    this.rekey(oldId, newId);
+
+    const moved = await this.rekey(oldId, newId);
+    if (!moved) {
+      return undefined;
+    }
+
+    // The record now lives under the new key but still names the old id inside.
+    // Rewrite it in place, preserving whatever lifetime RENAME carried over.
+    const remaining = await this.redis.ttl(key(newId));
+    if (remaining > 0) {
+      await this.redis.set(key(newId), JSON.stringify(conversation), 'EX', remaining);
+    } else {
+      await this.redis.set(key(newId), JSON.stringify(conversation), 'EX', SESSION_TTL_SECONDS);
+    }
+
     return newId;
+  }
+
+  /** How many conversations are currently held. Diagnostics only. */
+  async count(): Promise<number> {
+    const keys = await this.redis.keys(`${KEY_PREFIX}*`);
+    return keys.length;
   }
 }

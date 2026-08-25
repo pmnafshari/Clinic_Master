@@ -7,6 +7,7 @@ import { ToolRegistryService } from '../../src/modules/voice/tools/tool-registry
 import { ToolExecutorService } from '../../src/modules/voice/tools/tool-executor.service';
 import { AuditService } from '../../src/modules/audit/audit.service';
 import { VoiceTool } from '../../src/modules/voice/tools/tool-definition.interface';
+import { redisTestProvider, testRedis } from './redis-test-util';
 import {
   createAnonymousSession,
   createVerifiedSession,
@@ -35,7 +36,7 @@ describe('write tools', () => {
   let idempotency: IdempotencyService;
 
   beforeEach(() => {
-    idempotency = new IdempotencyService();
+    idempotency = new IdempotencyService(testRedis());
   });
 
   it('intake creates a patient and binds it to the session', async () => {
@@ -195,7 +196,7 @@ describe('write tools — routed through ToolExecutorService', () => {
   beforeEach(() => {
     registry = new ToolRegistryService();
     executor = new ToolExecutorService(registry, stubAudit());
-    idempotency = new IdempotencyService();
+    idempotency = new IdempotencyService(testRedis());
 
     patients = { create: jest.fn().mockResolvedValue({ id: 'p-new' }) };
     appointments = {
@@ -514,7 +515,14 @@ describe('write tools — routed through ToolExecutorService', () => {
 
     // Both calls are in flight before either can return — without this the
     // test would quietly become two sequential calls and prove nothing.
-    await Promise.resolve();
+    //
+    // Waiting for the gated operation to be entered rather than for a fixed
+    // tick: the idempotency lease is a Redis round trip now, so the operation
+    // is not reached within a microtask and releasing early would leave it
+    // unresolved.
+    for (let i = 0; i < 200 && releases.length === 0; i += 1) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
     expect(settled).toBe(0);
 
     releases.forEach((release) => release());
@@ -554,7 +562,13 @@ describe('write tools — routed through ToolExecutorService', () => {
 
     // Both are in flight before either can return — without this the test would
     // quietly become two sequential calls and prove nothing about the race.
-    await Promise.resolve();
+    //
+    // Waits for the gated operation to be entered rather than for a fixed
+    // tick: the idempotency lease is a Redis round trip, so the operation is
+    // not reached within a microtask.
+    for (let i = 0; i < 200 && releases.length === 0; i += 1) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
     expect(settled).toBe(0);
 
     releases.forEach((release) => release());

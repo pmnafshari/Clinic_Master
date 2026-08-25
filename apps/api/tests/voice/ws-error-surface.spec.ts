@@ -33,6 +33,7 @@ import { ToolRegistryService } from '../../src/modules/voice/tools/tool-registry
 import { ToolExecutorService } from '../../src/modules/voice/tools/tool-executor.service';
 import { AuditService } from '../../src/modules/audit/audit.service';
 import { IdempotencyService } from '../../src/modules/voice/idempotency/idempotency.service';
+import { redisTestProvider, testRedis } from './redis-test-util';
 
 class FakeTransport implements AudioTransport {
   readonly sent: ServerFrame[] = [];
@@ -74,6 +75,7 @@ async function buildGatewayThatThrows(error: unknown) {
     VoiceGateway,
     VoiceTurnRunner,
     TransportMetricsService,
+    redisTestProvider(),
     VoiceSessionStore,
     ToolRegistryService,
     ToolExecutorService,
@@ -102,6 +104,7 @@ async function buildGatewayWithThrowingRunner(error: unknown) {
     providers: [
       VoiceGateway,
       VoiceSessionStore,
+      redisTestProvider(),
       TransportMetricsService,
       ToolRegistryService,
       ToolExecutorService,
@@ -141,6 +144,7 @@ async function buildGatewayWithFailingStt(error: unknown) {
       VoiceTurnRunner,
       TransportMetricsService,
       VoiceSessionStore,
+      redisTestProvider(),
       ToolRegistryService,
       ToolExecutorService,
       ClaudeAgentService,
@@ -195,6 +199,7 @@ async function buildGatewayWithThrowingTts(error: unknown) {
       VoiceTurnRunner,
       TransportMetricsService,
       VoiceSessionStore,
+      redisTestProvider(),
       ToolRegistryService,
       ToolExecutorService,
       ClaudeAgentService,

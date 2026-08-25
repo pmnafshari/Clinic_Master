@@ -29,6 +29,7 @@ import { ToolRegistryService } from '../../src/modules/voice/tools/tool-registry
 import { ToolExecutorService } from '../../src/modules/voice/tools/tool-executor.service';
 import { AuditService } from '../../src/modules/audit/audit.service';
 import { IdempotencyService } from '../../src/modules/voice/idempotency/idempotency.service';
+import { redisTestProvider, testRedis } from './redis-test-util';
 
 class FakeTransport implements AudioTransport {
   readonly sent: ServerFrame[] = [];
@@ -135,6 +136,7 @@ async function build(options: { withTts?: boolean; startError?: Error } = {}) {
     VoiceGateway,
     VoiceTurnRunner,
     TransportMetricsService,
+    redisTestProvider(),
     VoiceSessionStore,
     ToolRegistryService,
     ToolExecutorService,
@@ -216,7 +218,7 @@ describe('STT confidence gate', () => {
 
     await stt().emitFinal('mumble', 0.2);
 
-    expect(store.get(id)?.session.turnIndex).toBe(0);
+    expect((await store.get(id))?.session.turnIndex).toBe(0);
   });
 
   it('delivers the re-prompt through the same path as any other reply', async () => {

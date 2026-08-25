@@ -149,6 +149,9 @@ describe('end to end: a browser holds an anonymous Tier 1 conversation', () => {
       .compile();
 
     app = moduleRef.createNestApplication();
+    // The real module owns a Redis connection; without shutdown hooks it stays
+    // open after app.close() and the run never exits.
+    app.enableShutdownHooks();
     app.useWebSocketAdapter(new WsOriginAdapter(app));
     await app.init();
     await app.listen(0);

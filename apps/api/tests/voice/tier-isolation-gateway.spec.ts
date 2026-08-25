@@ -156,7 +156,7 @@ describe('tier 2 is unreachable through the gateway', () => {
     const id = readyId(t);
     await gateway.handleFrame(t, { type: 'turn.text', text: 'what are your hours?' });
 
-    const session = store.get(id)?.session ?? store.get(readyId(t))?.session;
+    const session = (await store.get(id))?.session ?? (await store.get(readyId(t)))?.session;
     expect(session?.identityVerified).toBe(false);
 
     await moduleRef.close();

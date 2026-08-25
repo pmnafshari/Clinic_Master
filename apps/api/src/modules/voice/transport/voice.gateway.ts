@@ -128,7 +128,7 @@ export class VoiceGateway {
       // Nothing may escape this method. An unhandled rejection would take the
       // connection down without ever telling the caller anything, and the
       // provider's own words must not travel in its place.
-      const logId = this.logIdFor(transport);
+      const logId = await this.logIdFor(transport);
       this.metrics.providerError(logId, 'agent');
       logServerError(this.logger, logId, error);
       transport.send(toClientError(error, 'agent_unavailable'));
@@ -152,7 +152,7 @@ export class VoiceGateway {
     const frame = parsed.frame;
 
     if (frame.type === 'session.start') {
-      const sessionId = this.resume(frame.sessionId, this.pendingIdentity.get(transport));
+      const sessionId = await this.resume(frame.sessionId, this.pendingIdentity.get(transport));
 
       /**
        * One live socket per session. A second connection presenting the same
@@ -167,7 +167,7 @@ export class VoiceGateway {
        * has already learned everything the rejection would tell them.
        */
       if (this.liveSockets.has(sessionId)) {
-        this.metrics.connectionClosed(this.logIdForSession(sessionId), 'session_conflict');
+        this.metrics.connectionClosed(await this.logIdForSession(sessionId), 'session_conflict');
         transport.close('session_conflict');
         return;
       }
@@ -192,7 +192,7 @@ export class VoiceGateway {
        * there, and telling the client it expired would make it discard a live
        * conversation and start over.
        */
-      const logId = this.sessions.get(sessionId)?.session.logId ?? 'unknown';
+      const logId = (await this.sessions.get(sessionId))?.session.logId ?? 'unknown';
       const durationCap = setTimeout(() => {
         const capped = this.connections.get(transport);
         if (capped) {
@@ -209,16 +209,21 @@ export class VoiceGateway {
       // client, duration cap.
       transport.onTeardown(async () => {
         clearTimeout(durationCap);
+
+        // Stop audio first, before anything that awaits. The close metric now
+        // reads the log id from Redis, and a round trip's worth of frames
+        // would otherwise keep arriving at a socket that is already gone.
+        this.cancelSpeech(transport);
+        this.releaseClaim(transport);
+
+        await this.endRecogniser(transport);
         this.metrics.connectionClosed(
-          this.logIdFor(transport),
+          await this.logIdFor(transport),
           this.connections.get(transport)?.closeReason ?? 'client'
         );
-        this.releaseClaim(transport);
-        await this.endRecogniser(transport);
-        this.cancelSpeech(transport);
       });
 
-      this.metrics.connectionOpened(this.logIdFor(transport));
+      this.metrics.connectionOpened(await this.logIdFor(transport));
       transport.send({ type: 'session.ready', sessionId });
       return;
     }
@@ -230,7 +235,7 @@ export class VoiceGateway {
 
     if (frame.type === 'turn.text') {
       const state = this.connections.get(transport);
-      const conversation = state ? this.sessions.get(state.sessionId) : undefined;
+      const conversation = state ? await this.sessions.get(state.sessionId) : undefined;
 
       if (!state || !conversation) {
         transport.send({ type: 'error', code: 'session_expired' });
@@ -249,7 +254,7 @@ export class VoiceGateway {
    */
   async handleAudio(transport: AudioTransport, chunk: Buffer): Promise<void> {
     const state = this.connections.get(transport);
-    const conversation = state ? this.sessions.get(state.sessionId) : undefined;
+    const conversation = state ? await this.sessions.get(state.sessionId) : undefined;
 
     if (!state || !conversation) {
       transport.send({ type: 'error', code: 'session_expired' });
@@ -326,7 +331,7 @@ export class VoiceGateway {
     }
 
     state.uplinkBytesThisTurn = 0;
-    this.metrics.sttConfidence(this.logIdFor(transport), result.confidence);
+    this.metrics.sttConfidence(await this.logIdFor(transport), result.confidence);
 
     if (result.confidence < STT_MIN_CONFIDENCE) {
       // The same delivery path every other reply uses — not a second one.
@@ -359,7 +364,7 @@ export class VoiceGateway {
     state: ConnectionState,
     text: string
   ): Promise<void> {
-    const conversation = this.sessions.get(state.sessionId);
+    const conversation = await this.sessions.get(state.sessionId);
     if (!conversation) {
       transport.send({ type: 'error', code: 'session_expired' });
       return;
@@ -461,8 +466,8 @@ export class VoiceGateway {
         }
       } catch (error) {
         // Provider detail is logged server-side, never sent to the client.
-        this.metrics.providerError(this.logIdFor(transport), 'tts');
-        logServerError(this.logger, this.logIdFor(transport), error);
+        this.metrics.providerError(await this.logIdFor(transport), 'tts');
+        logServerError(this.logger, await this.logIdFor(transport), error);
       }
     }
 
@@ -491,6 +496,9 @@ export class VoiceGateway {
     state?: ConnectionState
   ): Promise<number> {
     let lastError: unknown;
+    // Resolved once, not per frame: this is the audio path, and a Redis round
+    // trip between chunks would show up as a gap the caller can hear.
+    const logId = await this.logIdFor(transport);
 
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
@@ -501,7 +509,7 @@ export class VoiceGateway {
             return frames;
           }
           if (frames === 0) {
-            this.metrics.ttsFirstFrame(this.logIdFor(transport), Date.now() - requestedAt);
+            this.metrics.ttsFirstFrame(logId, Date.now() - requestedAt);
           }
           transport.sendAudio?.(chunk);
           frames += 1;
@@ -511,7 +519,7 @@ export class VoiceGateway {
         lastError = error;
         // Bounded and logged: a provider degrading should be visible before it
         // starts costing callers whole replies.
-        logRetry(this.logger, this.logIdFor(transport), attempt + 1);
+        logRetry(this.logger, logId, attempt + 1);
       }
     }
 
@@ -522,7 +530,7 @@ export class VoiceGateway {
    * The non-secret correlation id for whatever connection this is, or a
    * placeholder before a session exists. Never the sessionId.
    */
-  private logIdFor(transport: AudioTransport): string {
+  private async logIdFor(transport: AudioTransport): Promise<string> {
     const state = this.connections.get(transport);
     if (!state) {
       return 'no-session';
@@ -530,8 +538,8 @@ export class VoiceGateway {
     return this.logIdForSession(state.sessionId);
   }
 
-  private logIdForSession(sessionId: string): string {
-    return this.sessions.get(sessionId)?.session.logId ?? 'no-session';
+  private async logIdForSession(sessionId: string): Promise<string> {
+    return (await this.sessions.get(sessionId))?.session.logId ?? 'no-session';
   }
 
   /** One synthesiser per connection, built on the first reply that needs one. */
@@ -568,8 +576,8 @@ export class VoiceGateway {
    * gateway into an oracle answering "does this session exist?" one guess at a
    * time — the enumeration attack the HTTP endpoint was written to avoid.
    */
-  private resume(candidate?: string, identity?: VerifiedIdentity): string {
-    const existing = candidate ? this.sessions.get(candidate) : undefined;
+  private async resume(candidate?: string, identity?: VerifiedIdentity): Promise<string> {
+    const existing = candidate ? await this.sessions.get(candidate) : undefined;
     if (existing) {
       return existing.session.sessionId;
     }
@@ -584,7 +592,7 @@ export class VoiceGateway {
       : createAnonymousSession();
 
     const conversation: Conversation = { session, history: [] };
-    this.sessions.set(session.sessionId, conversation);
+    await this.sessions.set(session.sessionId, conversation);
     return session.sessionId;
   }
 }

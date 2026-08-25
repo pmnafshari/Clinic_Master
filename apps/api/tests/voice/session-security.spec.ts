@@ -22,6 +22,7 @@ import { AuditService } from '../../src/modules/audit/audit.service';
 import { IdempotencyService } from '../../src/modules/voice/idempotency/idempotency.service';
 import { VoiceToolResult } from '../../src/modules/voice/tools/tool-definition.interface';
 import { VOICE_FEATURE_FLAG } from '../../src/modules/voice/voice.config';
+import { redisTestProvider, testRedis } from './redis-test-util';
 
 /**
  * Every model call the agent makes, so a test can inspect what conversation
@@ -35,6 +36,7 @@ interface Harness {
   modelCalls: Anthropic.MessageCreateParamsNonStreaming[];
   bookOperation: jest.Mock<Promise<VoiceToolResult>, []>;
   keysUsed: string[];
+  store: VoiceSessionStore;
 }
 
 function lastUserText(params: Anthropic.MessageCreateParamsNonStreaming): string {
@@ -75,6 +77,7 @@ async function buildHarness(): Promise<Harness> {
   const moduleRef: TestingModule = await Test.createTestingModule({
     controllers: [VoiceController],
     providers: [
+      redisTestProvider(),
       VoiceSessionStore,
       VoiceTicketService,
       ToolRegistryService,
@@ -119,6 +122,7 @@ async function buildHarness(): Promise<Harness> {
 
   return {
     app,
+    store: app.get(VoiceSessionStore),
     controller: moduleRef.get(VoiceController),
     idempotency,
     modelCalls,
@@ -290,21 +294,27 @@ describe('an evicted session cannot replay a stale confirmed write', () => {
    * expire the idempotency entry and make the assertions below pass for the
    * wrong reason.
    */
-  async function floodSessionStore(): Promise<void> {
-    for (let i = 0; i < MAX_ACTIVE_SESSIONS + 5; i += 1) {
-      await harness.controller.text({
-        sessionId: `filler-${i}`,
-        message: 'hello',
-      } as VoiceTextDto);
-    }
+  /**
+   * Makes a live session disappear, the way one does in production.
+   *
+   * This used to flood the store past MAX_ACTIVE_SESSIONS to force count-based
+   * eviction. That mechanism no longer exists: the store moved to Redis so
+   * instances can share it, and Redis bounds the keyspace by TTL and by its
+   * configured memory policy rather than by counting entries.
+   *
+   * The property under test is unchanged and is not about *why* the session
+   * went away — it is that a caller returning with an id the server no longer
+   * holds gets a fresh session, and that the fresh session cannot replay the
+   * old one's idempotency namespace. Expiring the key directly reproduces that
+   * exactly, and does it in one operation rather than a thousand.
+   */
+  async function makeSessionDisappear(sessionId: string): Promise<void> {
+    await harness.store.delete(sessionId);
   }
 
   /**
    * A literal, for the same reason voice-config.spec pins maxTokens and
-   * voice-endpoint.spec pins MAX_HISTORY_TURNS: floodSessionStore above loops
-   * `MAX_ACTIVE_SESSIONS + 5`, so every assertion in this describe block
-   * moves in lockstep with the constant and stays green even if it is set to
-   * 1 — which would evict nearly every session almost immediately. The
+   * voice-endpoint.spec pins MAX_HISTORY_TURNS. The
    * number is a deliberate capacity choice; if it changes on purpose, change
    * this literal too rather than deleting it.
    */
@@ -325,7 +335,7 @@ describe('an evicted session cannot replay a stale confirmed write', () => {
     expect(harness.keysUsed).toHaveLength(1);
     const keyBeforeEviction = harness.keysUsed[0];
 
-    await floodSessionStore();
+    await makeSessionDisappear(sessionId);
 
     // The caller comes back with the id they were given.
     const afterEviction = await post(harness.app, {

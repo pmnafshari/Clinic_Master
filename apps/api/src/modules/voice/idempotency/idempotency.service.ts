@@ -1,8 +1,9 @@
 import { createHash } from 'crypto';
-import { Inject, Injectable, Optional } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { VoiceToolResult } from '../tools/tool-definition.interface';
 import { VoiceSession } from '../session/voice-session';
-import { BoundedTtlMap, Clock, VOICE_CLOCK } from '../util/bounded-ttl-map';
+import { Redis } from 'ioredis';
+import { VOICE_REDIS } from '../session/redis.provider';
 
 /**
  * How long a confirmed result stays replayable. It only has to outlive a voice
@@ -10,50 +11,58 @@ import { BoundedTtlMap, Clock, VOICE_CLOCK } from '../util/bounded-ttl-map';
  */
 export const IDEMPOTENCY_TTL_MS = 15 * 60 * 1000;
 
-/** Hard ceiling on cached results, independent of the TTL. */
-export const IDEMPOTENCY_MAX_ENTRIES = 5000;
+const RESULT_PREFIX = 'voice:idem:';
+const LEASE_PREFIX = 'voice:idem:lock:';
+
+/**
+ * Where a winner publishes whatever it produced, so callers already waiting on
+ * the same key get that answer instead of running the operation again.
+ *
+ * Separate from the durable cache because it holds failures too: two callers
+ * overlapping on one booking must not both execute it, whether it succeeds or
+ * not. It is short-lived precisely so a failure is not replayed to anyone who
+ * arrives later — a retry then is legitimate.
+ */
+const OUTCOME_PREFIX = 'voice:idem:outcome:';
+const OUTCOME_TTL_SECONDS = 30;
+
+/** A tool call that has not finished inside this has stopped being useful. */
+const LEASE_TTL_SECONDS = 30;
+
+/** How long a loser waits for the winner's result before retrying itself. */
+const LEASE_WAIT_MS = 20_000;
+const LEASE_POLL_MS = 50;
 
 /**
  * A voice pipeline retries on timeout. Without this, one retry becomes a
  * second appointment or a second recorded payment.
  *
- * In-memory is correct for Phase 0 (single process, session-scoped keys).
- * The browser and phone phases move this to Redis, which is already in the
- * stack — the interface does not change.
+ * Backed by Redis so the guarantee holds across instances: a caller whose
+ * retry lands on a different process must still not book twice.
  */
 @Injectable()
 export class IdempotencyService {
   /**
-   * Bounded on both axes. The key derives from a client-supplied sessionId, so
-   * an unevicted map here is a remote memory-exhaustion vector: a caller who
-   * varies the sessionId grows it forever. Eviction is lazy rather than
-   * timer-driven — see BoundedTtlMap.
-   */
-  private readonly completed: BoundedTtlMap<VoiceToolResult>;
-
-  /**
-   * Work that has started but not finished. Checking `completed` and then
-   * awaiting the operation is two steps, and a retry arriving in the gap
-   * between them would find nothing cached and start a second write — which is
-   * the timeout retry this class exists to absorb. Overlapping callers join the
-   * promise already running instead.
+   * Executions currently running in THIS process, so two callers who arrive at
+   * the same moment share one execution and one outcome — a rejection
+   * included.
    *
-   * This one needs no bound: an entry is removed in a `finally` as soon as its
-   * operation settles, so its size is the number of tool calls in flight.
+   * This is request coalescing, not a cache and not a store. It holds only
+   * active, unsettled promises: an entry is created when an execution starts
+   * and removed the moment it settles, either way. Nothing survives settlement,
+   * so no result, failure, session or credential is ever held here. Redis
+   * remains the only shared source of coordination and the only place a
+   * completed result lives.
    */
   private readonly inFlight = new Map<string, Promise<VoiceToolResult>>();
 
-  constructor(@Optional() @Inject(VOICE_CLOCK) now?: Clock) {
-    this.completed = new BoundedTtlMap<VoiceToolResult>(
-      IDEMPOTENCY_MAX_ENTRIES,
-      IDEMPOTENCY_TTL_MS,
-      now ?? (() => Date.now())
-    );
-  }
+  constructor(@Inject(VOICE_REDIS) private readonly redis: Redis) {}
 
-  /** Exposed so the eviction bound is observable from a test. */
-  completedSize(): number {
-    return this.completed.size;
+  /** How many results are currently replayable. Diagnostics only. */
+  async completedSize(): Promise<number> {
+    const keys = await this.redis.keys(`${RESULT_PREFIX}*`);
+    // The lease keys share the prefix, so exclude them.
+    return keys.filter((k) => !k.startsWith(LEASE_PREFIX)).length;
   }
 
   /**
@@ -109,43 +118,116 @@ export class IdempotencyService {
       .join(':');
   }
 
+  /**
+   * Runs an operation once for a key, however many callers ask.
+   *
+   * Two things are true across every instance, not just this one:
+   *
+   *   - a confirmed result is replayed rather than re-executed, so a retry
+   *     that spans a rotation or a reconnect does not book twice;
+   *   - exactly one caller executes at a time. The winner takes a short lease;
+   *     the losers wait for the result rather than running their own copy.
+   *
+   * A failure is never cached. Caching one would stop a legitimate retry from
+   * ever succeeding, and the lease is released even when the operation throws
+   * so the key does not become permanently unusable.
+   */
   async runOnce(
     key: string,
     operation: () => Promise<VoiceToolResult>
   ): Promise<VoiceToolResult> {
-    const previous = this.completed.get(key);
-    if (previous) {
-      return previous;
+    const resultKey = `${RESULT_PREFIX}${key}`;
+    const leaseKey = `${LEASE_PREFIX}${key}`;
+    const outcomeKey = `${OUTCOME_PREFIX}${key}`;
+
+    const cached = await this.readResult(resultKey);
+    if (cached) {
+      return cached;
     }
 
-    const active = this.inFlight.get(key);
-    if (active) {
-      return active;
+    // A caller who arrives while this process is already running this key joins
+    // that execution rather than starting a second one. They receive whatever
+    // it produces, including a rejection.
+    const running = this.inFlight.get(key);
+    if (running) {
+      return running;
     }
 
-    const pending = (async () => {
-      const result = await operation();
-
-      // Only successful writes are replayed. Caching a failure would prevent a
-      // legitimate retry from ever succeeding. This runs before the promise
-      // settles, so no caller can observe the key as neither in flight nor
-      // completed.
-      if (result.status === 'confirmed') {
-        this.completed.set(key, result);
-      }
-
-      return result;
-    })();
-
-    this.inFlight.set(key, pending);
+    const execution = this.executeOnce(key, resultKey, leaseKey, outcomeKey, operation);
+    this.inFlight.set(key, execution);
 
     try {
-      return await pending;
+      return await execution;
     } finally {
-      // Always released — on success, on a 'failed' result, and on a throw.
-      // Leaving the entry behind would wedge the key: every later retry would
-      // join a promise that has already rejected and never run again.
+      // Removed on both paths. An entry left behind would turn coalescing into
+      // a cache, and a failure left behind would block every later retry.
       this.inFlight.delete(key);
     }
+  }
+
+  /**
+   * One execution, coordinated across instances by a Redis lease.
+   *
+   * The lease is what stops two processes running the same booking at once.
+   * Within a process that never happens anyway — the in-flight map above
+   * already coalesced them.
+   */
+  private async executeOnce(
+    key: string,
+    resultKey: string,
+    leaseKey: string,
+    outcomeKey: string,
+    operation: () => Promise<VoiceToolResult>
+  ): Promise<VoiceToolResult> {
+    const deadline = Date.now() + LEASE_WAIT_MS;
+
+    for (;;) {
+      const won = await this.redis.set(leaseKey, '1', 'EX', LEASE_TTL_SECONDS, 'NX');
+
+      if (won) {
+        try {
+          const result = await operation();
+          const encoded = JSON.stringify(result);
+
+          // Published for a caller on another instance already waiting on this
+          // key, whatever the outcome — they must not run a second copy.
+          await this.redis.set(outcomeKey, encoded, 'EX', OUTCOME_TTL_SECONDS);
+
+          // Only a success is replayed to callers arriving later. Caching a
+          // failure would stop a legitimate retry from ever succeeding.
+          if (result.status === 'confirmed') {
+            await this.redis.set(resultKey, encoded, 'EX', IDEMPOTENCY_TTL_MS / 1000);
+          }
+
+          return result;
+        } finally {
+          // Released even on a throw, so a retry is not blocked behind a lease
+          // whose holder has already given up. Nothing about the failure is
+          // written to Redis: a provider's own words do not belong in shared
+          // state any more than they belong in a client response.
+          await this.redis.del(leaseKey);
+        }
+      }
+
+      // Another instance holds the lease. Wait for its result rather than
+      // running a second copy of the same booking.
+      await new Promise((resolve) => setTimeout(resolve, LEASE_POLL_MS));
+
+      const settled = (await this.readResult(resultKey)) ?? (await this.readResult(outcomeKey));
+      if (settled) {
+        return settled;
+      }
+
+      if (Date.now() > deadline) {
+        // The holder failed or died without producing a result. A failure is
+        // not cached, so running it now is the correct retry.
+        return operation();
+      }
+    }
+  }
+
+  private async readResult(resultKey: string): Promise<VoiceToolResult | undefined> {
+    const raw = await this.redis.get(resultKey);
+    return raw ? (JSON.parse(raw) as VoiceToolResult) : undefined;
   }
 }
