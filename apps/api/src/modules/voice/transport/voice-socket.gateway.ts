@@ -58,7 +58,7 @@ export class VoiceSocketGateway implements OnGatewayConnection {
      * logged, and an absent or spent one simply leaves the socket anonymous,
      * which is exactly the public widget's behaviour.
      */
-    void this.bindTicketIdentity(transport, request);
+    this.bindTicketIdentity(transport, request);
 
     socket.on('message', (data: Buffer, isBinary: boolean) => {
       void this.dispatch(transport, data, isBinary);
@@ -75,19 +75,32 @@ export class VoiceSocketGateway implements OnGatewayConnection {
     });
   }
 
-  private async bindTicketIdentity(
+  /**
+   * Synchronous on purpose.
+   *
+   * Redemption itself is asynchronous — it reads the ticket store and then
+   * looks the patient up — but the *registration* of that work must happen
+   * before the message listener is attached below. Awaiting here instead, or
+   * calling this and letting it settle on its own, left a window in which a
+   * browser that sent `session.start` immediately was answered before anyone
+   * knew who it was, and it started anonymous despite holding a valid ticket.
+   */
+  private bindTicketIdentity(
     transport: BrowserWebSocketTransport,
     request?: IncomingMessage
-  ): Promise<void> {
+  ): void {
     const ticket = this.ticketFrom(request);
     if (!ticket) {
       return;
     }
 
-    const resolved = await this.identity.resolve(ticket);
-    if (resolved) {
-      this.gateway.bindIdentity(transport, resolved);
-    }
+    // Failure resolves to null rather than rejecting: the promise may never be
+    // awaited if the socket closes first, and an unhandled rejection would take
+    // the process down over a bad ticket. Null is the anonymous outcome.
+    this.gateway.bindIdentity(
+      transport,
+      this.identity.resolve(ticket).catch(() => null)
+    );
     // An unknown, expired or already-spent ticket resolves to nothing and the
     // socket continues anonymously. Rejecting it would tell a caller which
     // tickets exist, and there is nothing to gain: an anonymous session simply

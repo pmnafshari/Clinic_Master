@@ -86,7 +86,20 @@ export class VoiceGateway {
    * Identity resolved at connect, held until the session is created. Keyed by
    * transport so it disappears with the connection.
    */
-  private readonly pendingIdentity = new WeakMap<AudioTransport, VerifiedIdentity>();
+  /**
+   * The identity resolution for a socket, not its result.
+   *
+   * Redemption starts when the socket opens and involves a database lookup, so
+   * it is still in flight when a browser that sends `session.start` in the same
+   * tick arrives. Holding the resolved value meant that socket read an empty
+   * map and started anonymous — permanently, since a later start resumes the
+   * session that already exists. Holding the promise lets the start path wait
+   * for the answer instead of racing it.
+   */
+  private readonly pendingIdentity = new WeakMap<
+    AudioTransport,
+    Promise<VerifiedIdentity | null>
+  >();
 
   constructor(
     private readonly sessions: VoiceSessionStore,
@@ -111,13 +124,15 @@ export class VoiceGateway {
   ) {}
 
   /**
-   * Records the identity a socket authenticated as, before any frame is read.
+   * Records the identity a socket is authenticating as, before any frame is
+   * read.
    *
-   * Called by the socket gateway once, after it has consumed the ticket. The
-   * identity never comes from a frame, so nothing the browser sends can reach
-   * this.
+   * Called by the socket gateway once, synchronously, with the in-flight
+   * redemption rather than its result — registering it before the message
+   * listener exists is what closes the race. The identity never comes from a
+   * frame, so nothing the browser sends can reach this.
    */
-  bindIdentity(transport: AudioTransport, identity: VerifiedIdentity): void {
+  bindIdentity(transport: AudioTransport, identity: Promise<VerifiedIdentity | null>): void {
     this.pendingIdentity.set(transport, identity);
   }
 
@@ -152,7 +167,11 @@ export class VoiceGateway {
     const frame = parsed.frame;
 
     if (frame.type === 'session.start') {
-      const sessionId = await this.resume(frame.sessionId, this.pendingIdentity.get(transport));
+      // Waits for redemption if it is still in flight. A socket with no ticket
+      // has nothing registered here, so this resolves to undefined at once and
+      // an anonymous session is built exactly as before.
+      const identity = await this.pendingIdentity.get(transport);
+      const sessionId = await this.resume(frame.sessionId, identity);
 
       /**
        * One live socket per session. A second connection presenting the same
@@ -576,7 +595,10 @@ export class VoiceGateway {
    * gateway into an oracle answering "does this session exist?" one guess at a
    * time — the enumeration attack the HTTP endpoint was written to avoid.
    */
-  private async resume(candidate?: string, identity?: VerifiedIdentity): Promise<string> {
+  private async resume(
+    candidate?: string,
+    identity?: VerifiedIdentity | null
+  ): Promise<string> {
     const existing = candidate ? await this.sessions.get(candidate) : undefined;
     if (existing) {
       return existing.session.sessionId;
