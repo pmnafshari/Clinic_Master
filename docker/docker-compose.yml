@@ -25,6 +25,21 @@ services:
     image: redis:7-alpine
     container_name: smileflow-redis
     restart: unless-stopped
+    # Voice session and idempotency state live here, keyed by a value the
+    # caller influences. Without a ceiling that is a remote memory-exhaustion
+    # vector; with the default `noeviction` policy a full Redis starts refusing
+    # writes, which takes voice down for every instance at once.
+    #
+    # volatile-lru rather than allkeys-lru: every key this application writes
+    # carries a TTL, so the bound is the same, but a key written later without
+    # one cannot be silently evicted.
+    #
+    # THIS FILE CONFIGURES LOCAL AND CI ONLY. A production Redis must be given
+    # the same limits by whoever operates it — see the README.
+    command: >-
+      redis-server
+      --maxmemory 256mb
+      --maxmemory-policy volatile-lru
     ports:
       - '127.0.0.1:6379:6379'
     volumes:

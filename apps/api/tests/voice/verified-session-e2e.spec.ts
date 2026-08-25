@@ -104,6 +104,9 @@ describe('a ticketed browser session reaches Tier 2 through the real module', ()
       .compile();
 
     app = moduleRef.createNestApplication();
+    // The real module owns a Redis connection; without shutdown hooks it stays
+    // open after app.close() and the run never exits.
+    app.enableShutdownHooks();
     app.useWebSocketAdapter(new WsOriginAdapter(app));
     await app.init();
     await app.listen(0);
@@ -124,7 +127,7 @@ describe('a ticketed browser session reaches Tier 2 through the real module', ()
     const sessionId = ready.sessionId as string;
 
     // Verified, with a server-derived patient the browser never named.
-    const session = store.get(sessionId)!.session;
+    const session = (await store.get(sessionId))!.session;
     expect(session.identityVerified).toBe(true);
     expect(session.patientId).toBe('patient-owner');
     expect(session.userId).toBe('user-owner');
@@ -152,7 +155,7 @@ describe('a ticketed browser session reaches Tier 2 through the real module', ()
     browser.send({ type: 'session.start' });
     const ready = await browser.waitFor('session.ready');
 
-    const session = store.get(ready.sessionId as string)!.session;
+    const session = (await store.get(ready.sessionId as string))!.session;
     expect(session.identityVerified).toBe(false);
     expect(session.patientId).toBeNull();
 
@@ -178,7 +181,7 @@ describe('a ticketed browser session reaches Tier 2 through the real module', ()
     replay.send({ type: 'session.start' });
     const ready = await replay.waitFor('session.ready');
 
-    expect(store.get(ready.sessionId as string)!.session.identityVerified).toBe(false);
+    expect((await store.get(ready.sessionId as string))!.session.identityVerified).toBe(false);
     replay.close();
   }, 30000);
 
@@ -189,7 +192,7 @@ describe('a ticketed browser session reaches Tier 2 through the real module', ()
     browser.send({ type: 'session.start' });
     const ready = await browser.waitFor('session.ready');
 
-    expect(store.get(ready.sessionId as string)!.session.identityVerified).toBe(false);
+    expect((await store.get(ready.sessionId as string))!.session.identityVerified).toBe(false);
     browser.close();
   }, 30000);
 });

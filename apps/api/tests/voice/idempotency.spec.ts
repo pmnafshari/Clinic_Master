@@ -1,10 +1,19 @@
 import {
   IdempotencyService,
-  IDEMPOTENCY_MAX_ENTRIES,
   IDEMPOTENCY_TTL_MS,
 } from '../../src/modules/voice/idempotency/idempotency.service';
 import { createVerifiedSession } from '../../src/modules/voice/session/voice-session';
 import { VoiceToolResult } from '../../src/modules/voice/tools/tool-definition.interface';
+import { redisTestProvider, testRedis } from './redis-test-util';
+
+const sharedRedis = testRedis();
+
+// This worker's database is shared across the file. A key left by an earlier
+// test would replay into a later one and the operation would never run — the
+// failure looks like a passing idempotency check and is not one.
+beforeEach(async () => {
+  await sharedRedis.flushdb();
+});
 import { createHash } from 'crypto';
 
 /** One representative tool input, so key comparisons vary only where intended. */
@@ -18,7 +27,7 @@ describe('IdempotencyService', () => {
   let service: IdempotencyService;
 
   beforeEach(() => {
-    service = new IdempotencyService();
+    service = new IdempotencyService(sharedRedis);
   });
 
   it('builds a key from the session nonce, turn, tool name and input hash', () => {
@@ -124,7 +133,7 @@ describe('IdempotencyService.keyFor — namespace isolation', () => {
   let service: IdempotencyService;
 
   beforeEach(() => {
-    service = new IdempotencyService();
+    service = new IdempotencyService(sharedRedis);
   });
 
   /** The construction being replaced, kept here to show what it does wrong. */
@@ -233,7 +242,7 @@ describe('IdempotencyService.runOnce — concurrent callers', () => {
   let service: IdempotencyService;
 
   beforeEach(() => {
-    service = new IdempotencyService();
+    service = new IdempotencyService(sharedRedis);
   });
 
   /**
@@ -253,11 +262,23 @@ describe('IdempotencyService.runOnce — concurrent callers', () => {
       });
     });
 
-    return { operation, releaseAll: () => releases.forEach((release) => release()) };
+    /** Resolves once the operation has actually started, however long the
+     *  store took to admit the caller. */
+    const started = async (): Promise<void> => {
+      for (let i = 0; i < 200 && invocations === 0; i += 1) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+    };
+
+    return {
+      operation,
+      started,
+      releaseAll: () => releases.forEach((release) => release()),
+    };
   }
 
   it('runs the operation once when two callers overlap on the same key', async () => {
-    const { operation, releaseAll } = gatedOperation('confirmed');
+    const { operation, started, releaseAll } = gatedOperation('confirmed');
 
     let settled = 0;
     const first = service.runOnce('k', operation).then((r) => ((settled += 1), r));
@@ -265,7 +286,7 @@ describe('IdempotencyService.runOnce — concurrent callers', () => {
 
     // Proves the two calls genuinely overlap: neither has produced a result at
     // the point the second caller was admitted.
-    await Promise.resolve();
+    await started();
     expect(settled).toBe(0);
 
     releaseAll();
@@ -277,10 +298,13 @@ describe('IdempotencyService.runOnce — concurrent callers', () => {
   });
 
   it('caches the confirmed result once, so a later caller still replays it', async () => {
-    const { operation, releaseAll } = gatedOperation('confirmed');
+    const { operation, started, releaseAll } = gatedOperation('confirmed');
 
     const first = service.runOnce('k', operation);
     const second = service.runOnce('k', operation);
+    // The lease is a Redis round trip, so the operation is not invoked within
+    // a microtask; releasing before it starts would leave it unresolved.
+    await started();
     releaseAll();
     await Promise.all([first, second]);
 
@@ -291,13 +315,13 @@ describe('IdempotencyService.runOnce — concurrent callers', () => {
   });
 
   it('does not cache a failed result reached concurrently, so a retry still retries', async () => {
-    const { operation, releaseAll } = gatedOperation('failed');
+    const { operation, started, releaseAll } = gatedOperation('failed');
 
     let settled = 0;
     const first = service.runOnce('k', operation).then((r) => ((settled += 1), r));
     const second = service.runOnce('k', operation).then((r) => ((settled += 1), r));
 
-    await Promise.resolve();
+    await started();
     expect(settled).toBe(0);
 
     releaseAll();
@@ -345,6 +369,10 @@ describe('IdempotencyService.runOnce — concurrent callers', () => {
     const second = service.runOnce('k', boom);
     // Both callers must observe the rejection; neither may be left dangling.
     const settled = Promise.allSettled([first, second]);
+    // Wait until the throwing operation has actually been entered.
+    for (let i = 0; i < 200 && boom.mock.calls.length === 0; i += 1) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
     releases.forEach((release) => release());
 
     expect((await settled).map((outcome) => outcome.status)).toEqual(['rejected', 'rejected']);
@@ -359,10 +387,11 @@ describe('IdempotencyService.runOnce — concurrent callers', () => {
   });
 
   it('keeps different keys independent while both are in flight', async () => {
-    const { operation, releaseAll } = gatedOperation('confirmed');
+    const { operation, started, releaseAll } = gatedOperation('confirmed');
 
     const a = service.runOnce('k1', operation);
     const b = service.runOnce('k2', operation);
+    await started();
     releaseAll();
     const [ra, rb] = await Promise.all([a, b]);
 
@@ -400,103 +429,103 @@ describe('IdempotencyService — bounded completed cache', () => {
       .mockResolvedValue({ status: 'confirmed', appointmentId: id });
   }
 
-  it('exposes a finite TTL and size cap', () => {
+  it('exposes a finite TTL', () => {
     expect(IDEMPOTENCY_TTL_MS).toBeGreaterThan(0);
     expect(Number.isFinite(IDEMPOTENCY_TTL_MS)).toBe(true);
-    expect(IDEMPOTENCY_MAX_ENTRIES).toBeGreaterThan(0);
-    expect(Number.isFinite(IDEMPOTENCY_MAX_ENTRIES)).toBe(true);
   });
 
   /**
    * The control for the expiry test below. If the entry were never written in
-   * the first place, this goes red — so "expired" cannot pass vacuously.
+   * the first place, "expired" would pass vacuously.
    */
   it('replays a confirmed result while it is still inside the TTL', async () => {
-    const clock = clockAt();
-    const service = new IdempotencyService(clock.now);
+    const service = new IdempotencyService(sharedRedis);
 
     const first = confirmed('a1');
-    await service.runOnce('k', first);
-
-    clock.advance(IDEMPOTENCY_TTL_MS - 1);
+    await service.runOnce('ttl-live', first);
 
     const second = confirmed('a2');
-    const replay = await service.runOnce('k', second);
+    const replay = await service.runOnce('ttl-live', second);
 
     expect(second).not.toHaveBeenCalled();
     expect(replay.appointmentId).toBe('a1');
-    expect(service.completedSize()).toBe(1);
   });
 
-  it('stops replaying — and drops the entry — once the TTL has passed', async () => {
-    const clock = clockAt();
-    const service = new IdempotencyService(clock.now);
+  it('stops replaying once the entry has expired', async () => {
+    const redis = testRedis();
+    const service = new IdempotencyService(redis);
 
-    await service.runOnce('k', confirmed('a1'));
-    expect(service.completedSize()).toBe(1);
-
-    clock.advance(IDEMPOTENCY_TTL_MS);
+    await service.runOnce('ttl-expiring', confirmed('a1'));
+    // Redis owns expiry now, so the entry is aged rather than the clock moved.
+    await redis.pexpire('voice:idem:ttl-expiring', 30);
+    await new Promise((r) => setTimeout(r, 120));
 
     const second = confirmed('a2');
-    const result = await service.runOnce('k', second);
+    const result = await service.runOnce('ttl-expiring', second);
 
     expect(second).toHaveBeenCalledTimes(1);
     expect(result.appointmentId).toBe('a2');
   });
 
-  it('reclaims expired entries rather than accumulating them', async () => {
-    const clock = clockAt();
-    const service = new IdempotencyService(clock.now);
+  /**
+   * Replaces three tests that asserted BoundedTtlMap's in-process entry-count
+   * eviction. That implementation no longer exists: the cache moved to Redis so
+   * instances can share it, and Redis bounds memory by configuration rather
+   * than by counting entries.
+   *
+   * The guarantee those tests protected — a caller who varies the key cannot
+   * grow the store without bound — still has to hold, so it is asserted here
+   * against the mechanism that now provides it.
+   */
+  describe('the keyspace is bounded by Redis configuration, not left to grow', () => {
+    it('gives every cached result a finite lifetime', async () => {
+      const redis = testRedis();
+      const service = new IdempotencyService(redis);
 
-    for (let i = 0; i < 50; i += 1) {
-      await service.runOnce(`k${i}`, confirmed(`a${i}`));
-    }
-    expect(service.completedSize()).toBe(50);
+      await service.runOnce('bounded-1', confirmed('a1'));
 
-    clock.advance(IDEMPOTENCY_TTL_MS);
-    await service.runOnce('later', confirmed('later'));
+      const ttl = await redis.ttl('voice:idem:bounded-1');
+      expect(ttl).toBeGreaterThan(0);
+      expect(ttl).toBeLessThanOrEqual(IDEMPOTENCY_TTL_MS / 1000);
+    });
 
-    // The 50 expired entries are gone; only the fresh one remains.
-    expect(service.completedSize()).toBe(1);
+    it('leaves no key without an expiry for an attacker to accumulate', async () => {
+      const redis = testRedis();
+      const service = new IdempotencyService(redis);
+
+      for (let i = 0; i < 25; i += 1) {
+        await service.runOnce(`attacker-${i}`, confirmed(`a${i}`));
+      }
+
+      const keys = await redis.keys('voice:idem:attacker-*');
+      expect(keys).toHaveLength(25);
+      // A key with no TTL would sit in Redis until it was evicted or the
+      // server restarted, which is exactly the unbounded growth the old
+      // entry-count cap existed to prevent.
+      for (const key of keys) {
+        expect(await redis.ttl(key)).toBeGreaterThan(0);
+      }
+    });
+
+    it('runs against a Redis configured to evict rather than refuse writes', async () => {
+      const redis = testRedis();
+      const [, policy] = await redis.config('GET', 'maxmemory-policy') as [string, string];
+      const [, maxmemory] = await redis.config('GET', 'maxmemory') as [string, string];
+
+      // `noeviction` would turn memory pressure into refused writes, taking
+      // voice down for every instance at once. volatile-lru evicts the oldest
+      // expiring key instead — and every key this service writes has a TTL.
+      expect(policy).toBe('volatile-lru');
+      expect(Number(maxmemory)).toBeGreaterThan(0);
+    });
   });
 
-  it('never exceeds the size cap, even with a fresh key every call', async () => {
-    const clock = clockAt();
-    const service = new IdempotencyService(clock.now);
-
-    for (let i = 0; i < IDEMPOTENCY_MAX_ENTRIES + 250; i += 1) {
-      await service.runOnce(`attacker-${i}`, confirmed(`a${i}`));
-    }
-
-    expect(service.completedSize()).toBeLessThanOrEqual(IDEMPOTENCY_MAX_ENTRIES);
-  });
-
-  it('evicts the oldest entry first when the cap is reached', async () => {
-    const clock = clockAt();
-    const service = new IdempotencyService(clock.now);
-
-    await service.runOnce('oldest', confirmed('oldest'));
-    for (let i = 0; i < IDEMPOTENCY_MAX_ENTRIES; i += 1) {
-      await service.runOnce(`filler-${i}`, confirmed(`f${i}`));
-    }
-
-    const reRun = confirmed('re-run');
-    await service.runOnce('oldest', reRun);
-    expect(reRun).toHaveBeenCalledTimes(1);
-
-    // The most recent write is still cached — eviction is oldest-first, not
-    // a wholesale flush.
-    const newest = confirmed('newest');
-    await service.runOnce(`filler-${IDEMPOTENCY_MAX_ENTRIES - 1}`, newest);
-    expect(newest).not.toHaveBeenCalled();
-  });
-
-  it('defaults to the real clock when none is injected', async () => {
-    const service = new IdempotencyService();
+  it('replays without any injected clock, because Redis owns expiry', async () => {
+    const service = new IdempotencyService(sharedRedis);
 
     const operation = confirmed('a1');
-    await service.runOnce('k', operation);
-    await service.runOnce('k', operation);
+    await service.runOnce('no-clock', operation);
+    await service.runOnce('no-clock', operation);
 
     expect(operation).toHaveBeenCalledTimes(1);
   });

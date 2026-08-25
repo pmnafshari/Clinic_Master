@@ -20,6 +20,7 @@ import { ToolExecutorService } from '../../src/modules/voice/tools/tool-executor
 import { AuditService } from '../../src/modules/audit/audit.service';
 import { IdempotencyService } from '../../src/modules/voice/idempotency/idempotency.service';
 import { ToolTier } from '../../src/modules/voice/tools/tool-definition.interface';
+import { redisTestProvider, testRedis } from './redis-test-util';
 
 /**
  * Fixtures are duplicated rather than shared with voice-gateway.spec.ts on
@@ -85,6 +86,7 @@ async function buildGatewayWithIntake() {
       VoiceGateway,
       VoiceTurnRunner,
       TransportMetricsService,
+      redisTestProvider(),
       VoiceSessionStore,
       ToolRegistryService,
       ToolExecutorService,
@@ -153,7 +155,7 @@ describe('session rotation over the websocket', () => {
     await gateway.handleFrame(transport, { type: 'turn.text', text: 'my name is Dana' });
 
     const announced = rotatedFrames(transport)[0].sessionId;
-    const authoritative = store.get(announced);
+    const authoritative = await store.get(announced);
 
     expect(authoritative).toBeDefined();
     expect(authoritative!.session.sessionId).toBe(announced);
@@ -168,8 +170,8 @@ describe('session rotation over the websocket', () => {
     await gateway.handleFrame(transport, { type: 'turn.text', text: 'my name is Dana' });
     const newId = rotatedFrames(transport)[0].sessionId;
 
-    expect(store.get(originalId)).toBeUndefined();
-    expect(store.get(newId)).toBeDefined();
+    expect(await store.get(originalId)).toBeUndefined();
+    expect(await store.get(newId)).toBeDefined();
 
     // A socket presenting the dead id gets a fresh session, not an error.
     const other = new FakeTransport();
@@ -206,7 +208,7 @@ describe('session rotation over the websocket', () => {
     const frame = rotatedFrames(transport)[0];
     expect(Object.keys(frame).sort()).toEqual(['sessionId', 'type']);
 
-    const session = store.get(frame.sessionId)!.session;
+    const session = (await store.get(frame.sessionId))!.session;
     const serialised = JSON.stringify(frame);
     expect(serialised).not.toContain(session.idempotencyNonce);
     expect(serialised).not.toContain(session.logId);

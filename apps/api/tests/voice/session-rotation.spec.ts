@@ -75,6 +75,7 @@ import { IdempotencyService } from '../../src/modules/voice/idempotency/idempote
 import { VOICE_FEATURE_FLAG } from '../../src/modules/voice/voice.config';
 import { ToolTier } from '../../src/modules/voice/tools/tool-definition.interface';
 import { VoiceSession } from '../../src/modules/voice/session/voice-session';
+import { redisTestProvider, testRedis } from './redis-test-util';
 
 /** A stand-in intake tool: binds a patient exactly the way the real one does. */
 class FakeIntakeTool {
@@ -115,6 +116,7 @@ async function buildApp(): Promise<INestApplication> {
   const moduleRef = await Test.createTestingModule({
     controllers: [VoiceController],
     providers: [
+      redisTestProvider(),
       VoiceSessionStore,
       VoiceTicketService,
       ToolRegistryService,
@@ -217,7 +219,7 @@ describe('session rotation over HTTP', () => {
       .send({ sessionId: first.body.sessionId, message: 'my name is Dana' })
       .expect(200);
 
-    const conversation = store.get(rotated.body.sessionId);
+    const conversation = await store.get(rotated.body.sessionId);
     expect(conversation).toBeDefined();
 
     // The key is derived from the nonce and the turn index — never from the
@@ -237,7 +239,7 @@ describe('session rotation over HTTP', () => {
       .post('/voice/text')
       .send({ message: 'what are your hours?' })
       .expect(200);
-    const before = store.get(first.body.sessionId)!;
+    const before = (await store.get(first.body.sessionId))!;
     const nonceBefore = before.session.idempotencyNonce;
     const logIdBefore = before.session.logId;
     const historyLengthBefore = before.history.length;
@@ -247,7 +249,7 @@ describe('session rotation over HTTP', () => {
       .send({ sessionId: first.body.sessionId, message: 'my name is Dana' })
       .expect(200);
 
-    const after = store.get(rotated.body.sessionId)!;
+    const after = (await store.get(rotated.body.sessionId))!;
     expect(after.session.idempotencyNonce).toBe(nonceBefore);
     expect(after.session.logId).toBe(logIdBefore);
     expect(after.session.turnIndex).toBe(2);

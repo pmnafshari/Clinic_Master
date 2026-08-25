@@ -170,7 +170,7 @@ export class VoiceController {
      * Ids are 256 CSPRNG bits, so guessing a live one is not a practical
      * attack rather than merely an inconvenient one.
      */
-    const resumed = dto.sessionId ? this.sessions.get(dto.sessionId) : undefined;
+    const resumed = dto.sessionId ? await this.sessions.get(dto.sessionId) : undefined;
     const conversation: Conversation = resumed ?? {
       session: createAnonymousSession(),
       history: [],
@@ -200,7 +200,7 @@ export class VoiceController {
     // refreshes the TTL and marks the conversation as recently used, so an
     // active caller is not evicted ahead of a quiet one.
     const previousId = conversation.session.sessionId;
-    this.sessions.set(previousId, conversation);
+    await this.sessions.set(previousId, conversation);
 
     /**
      * The session can now act for a specific patient, so the credential the
@@ -213,14 +213,19 @@ export class VoiceController {
      * response below returns the new authoritative id with no change to the
      * response shape.
      */
+    let authoritativeId = previousId;
     if (privilegeChanged(before, conversation.session)) {
-      this.sessions.rotate(previousId);
+      // The new id comes from rotate's return value. It cannot come from
+      // `conversation.session` any more: the store round-trips through Redis,
+      // so it rotates a copy and this object still names the dead credential.
+      // Returning that would hand the caller an id the server has destroyed.
+      authoritativeId = (await this.sessions.rotate(previousId)) ?? previousId;
     }
 
     return {
       // Always returned, so the caller knows which id is authoritative — on
       // first contact, and after an unrecognised id started a new conversation.
-      sessionId: conversation.session.sessionId,
+      sessionId: authoritativeId,
       reply: turn.reply,
       toolCalls: turn.toolCalls,
       verified: conversation.session.identityVerified,

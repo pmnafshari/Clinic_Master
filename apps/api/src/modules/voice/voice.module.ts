@@ -21,6 +21,7 @@ import { IdempotencyService } from './idempotency/idempotency.service';
 import { ClaudeAgentService } from './agent/claude.agent';
 import { VoiceController } from './voice.controller';
 import { VoiceSessionStore } from './session/voice-session.store';
+import { voiceRedisProvider, VoiceRedisLifecycle } from './session/redis.provider';
 import { VoiceTicketService } from './session/voice-ticket.service';
 import { VerifiedIdentityService } from './session/verified-identity.service';
 import { VoiceGateway } from './transport/voice.gateway';
@@ -39,6 +40,8 @@ import { VOICE_CONFIG, VOICE_FEATURE_FLAG } from './voice.config';
   controllers: [VoiceController],
   providers: [
     ClaudeAgentService,
+    voiceRedisProvider,
+    VoiceRedisLifecycle,
     VoiceSessionStore,
     VoiceTicketService,
     VerifiedIdentityService,

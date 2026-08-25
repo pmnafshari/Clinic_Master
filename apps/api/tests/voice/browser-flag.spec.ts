@@ -27,6 +27,7 @@ import { ToolRegistryService } from '../../src/modules/voice/tools/tool-registry
 import { ToolExecutorService } from '../../src/modules/voice/tools/tool-executor.service';
 import { AuditService } from '../../src/modules/audit/audit.service';
 import { IdempotencyService } from '../../src/modules/voice/idempotency/idempotency.service';
+import { redisTestProvider, testRedis } from './redis-test-util';
 
 const ORIGIN = 'http://localhost:3000';
 
@@ -81,6 +82,7 @@ async function startServer(flag?: { browserEnabled: boolean }) {
     { provide: PrismaService, useValue: { patient: { findUnique: async () => null } } },
     VoiceGateway,
     VoiceTurnRunner,
+    redisTestProvider(),
     VoiceSessionStore,
     TransportMetricsService,
     ToolRegistryService,
@@ -170,6 +172,9 @@ describe('the browser voice endpoint is gated by the flag', () => {
   }, 15000);
 
   it('issues no session at all while disabled', async () => {
+    // This worker's database is shared, so count only means something from a
+    // clean slate.
+    await testRedis().flushdb();
     const started = await startServer({ browserEnabled: false });
     app = started.app;
     const store = started.app.get(VoiceSessionStore);
@@ -177,6 +182,6 @@ describe('the browser voice endpoint is gated by the flag', () => {
     await probe(started.url);
 
     // A disabled deployment must not accumulate sessions from probing.
-    expect(store.size).toBe(0);
+    expect(await store.count()).toBe(0);
   }, 15000);
 });

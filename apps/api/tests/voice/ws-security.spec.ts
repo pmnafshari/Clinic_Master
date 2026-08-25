@@ -74,6 +74,7 @@ async function buildGateway() {
       VoiceGateway,
       VoiceTurnRunner,
       TransportMetricsService,
+      { provide: VOICE_REDIS, useValue: sharedRedis },
       VoiceSessionStore,
       ToolRegistryService,
       ToolExecutorService,
@@ -115,7 +116,7 @@ describe('unknown session ids are not an enumeration oracle', () => {
 
     await gateway.handleFrame(transport, { type: 'session.start', sessionId: 'chosen-by-client' });
 
-    expect(store.get('chosen-by-client')).toBeUndefined();
+    expect(await store.get('chosen-by-client')).toBeUndefined();
     expect(readyId(transport)).toHaveLength(43);
   });
 
@@ -125,7 +126,7 @@ describe('unknown session ids are not an enumeration oracle', () => {
     await gateway.handleFrame(first, { type: 'session.start' });
     const id = readyId(first);
 
-    store.delete(id);
+    await store.delete(id);
     await first.fireTeardown();
 
     const revisit = new FakeTransport();
@@ -285,7 +286,7 @@ describe('per-session rate limiting', () => {
     // it is the tighter of the two. What matters is that the agent stopped
     // being called: turnIndex is advanced by ClaudeAgentService.respond, so a
     // count below the attempts proves the rejected turns never reached it.
-    const ran = store.get(id)!.session.turnIndex;
+    const ran = (await store.get(id))!.session.turnIndex;
     expect(ran).toBe(WS_MAX_TURNS_PER_MINUTE);
     expect(ran).toBeLessThan(attempts);
   });
@@ -328,6 +329,15 @@ describe('per-session rate limiting', () => {
 
 import { WsOriginAdapter } from '../../src/modules/voice/transport/ws-origin.adapter';
 import { WS_MAX_CONNECTIONS_PER_IP_PER_MINUTE } from '../../src/modules/voice/transport/transport-limits';
+import { redisTestProvider, testRedis } from './redis-test-util';
+import { VOICE_REDIS } from '../../src/modules/voice/session/redis.provider';
+
+const sharedRedis = testRedis();
+
+beforeAll(async () => {
+  // Force the handshake now, while the clock is still real.
+  await sharedRedis.ping();
+});
 
 describe('upgrade-time connection controls', () => {
   const original = process.env.FRONTEND_URL;
@@ -405,6 +415,8 @@ describe('upgrade-time connection controls', () => {
 
 describe('connection duration cap', () => {
   beforeEach(() => {
+    // The Redis socket is already open, so faking the clock here cannot stall
+    // the handshake — only the gateway's own duration timer is affected.
     jest.useFakeTimers();
   });
 
@@ -418,7 +430,7 @@ describe('connection duration cap', () => {
     await gateway.handleFrame(transport, { type: 'session.start' });
 
     expect(transport.closedWith).toBeNull();
-    jest.advanceTimersByTime(WS_MAX_CONNECTION_MS);
+    await jest.advanceTimersByTimeAsync(WS_MAX_CONNECTION_MS);
 
     expect(transport.closedWith).toBe('rate_limited');
   });
@@ -428,7 +440,7 @@ describe('connection duration cap', () => {
     const transport = new FakeTransport();
     await gateway.handleFrame(transport, { type: 'session.start' });
 
-    jest.advanceTimersByTime(WS_MAX_CONNECTION_MS - 1);
+    await jest.advanceTimersByTimeAsync(WS_MAX_CONNECTION_MS - 1);
 
     expect(transport.closedWith).toBeNull();
   });
@@ -439,7 +451,7 @@ describe('connection duration cap', () => {
     await gateway.handleFrame(transport, { type: 'session.start' });
     const sessionId = readyId(transport);
 
-    jest.advanceTimersByTime(WS_MAX_CONNECTION_MS);
+    await jest.advanceTimersByTimeAsync(WS_MAX_CONNECTION_MS);
 
     const reconnect = new FakeTransport();
     await gateway.handleFrame(reconnect, { type: 'session.start', sessionId });
@@ -455,12 +467,12 @@ describe('connection duration cap', () => {
     const sessionId = readyId(transport);
     await gateway.handleFrame(transport, { type: 'turn.text', text: 'what are your hours?' });
 
-    jest.advanceTimersByTime(WS_MAX_CONNECTION_MS);
+    await jest.advanceTimersByTimeAsync(WS_MAX_CONNECTION_MS);
 
     // The socket ended; the session did not. Closing with session_expired
     // instead would tell the client to throw the conversation away.
-    expect(store.get(sessionId)).toBeDefined();
-    expect(store.get(sessionId)!.history.length).toBeGreaterThan(0);
+    expect(await store.get(sessionId)).toBeDefined();
+    expect((await store.get(sessionId))!.history.length).toBeGreaterThan(0);
   });
 
   it('cancels the timer when the client disconnects first', async () => {
@@ -469,7 +481,7 @@ describe('connection duration cap', () => {
     await gateway.handleFrame(transport, { type: 'session.start' });
 
     await transport.fireTeardown();
-    jest.advanceTimersByTime(WS_MAX_CONNECTION_MS * 2);
+    await jest.advanceTimersByTimeAsync(WS_MAX_CONNECTION_MS * 2);
 
     // A fired timer here would call close() on a socket that is already gone,
     // and would free a slot the caller may have reclaimed.
@@ -487,7 +499,7 @@ describe('connection duration cap', () => {
     expect(second.closedWith).toBe('session_conflict');
     expect(second.registeredTeardowns()).toBe(0);
 
-    jest.advanceTimersByTime(WS_MAX_CONNECTION_MS);
+    await jest.advanceTimersByTimeAsync(WS_MAX_CONNECTION_MS);
 
     // The rejected socket's phantom timer must not evict the live socket.
     expect(first.closedWith).toBe('rate_limited');
@@ -502,7 +514,7 @@ describe('connection duration cap', () => {
     await gateway.handleFrame(timedOut, { type: 'session.start' });
     const sessionId = readyId(timedOut);
 
-    jest.advanceTimersByTime(WS_MAX_CONNECTION_MS);
+    await jest.advanceTimersByTimeAsync(WS_MAX_CONNECTION_MS);
 
     const reconnected = new FakeTransport();
     await gateway.handleFrame(reconnected, { type: 'session.start', sessionId });
@@ -528,7 +540,7 @@ describe('connection duration cap', () => {
     await gateway.handleFrame(transport, { type: 'session.start' });
     const sessionId = readyId(transport);
 
-    jest.advanceTimersByTime(WS_MAX_CONNECTION_MS);
+    await jest.advanceTimersByTimeAsync(WS_MAX_CONNECTION_MS);
 
     expect(warnings.join('\n')).not.toContain(sessionId);
     expect(warnings.join('\n')).toMatch(/Connection duration cap reached for [0-9a-f]{16}/);

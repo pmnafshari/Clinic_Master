@@ -46,11 +46,11 @@ export class VoiceTurnRunner {
     conversation.history = turn.history;
 
     const previousId = conversation.session.sessionId;
-    this.sessions.set(previousId, conversation);
+    await this.sessions.set(previousId, conversation);
 
     let sessionId = previousId;
     if (privilegeChanged(before, conversation.session)) {
-      const rotated = this.sessions.rotate(previousId);
+      const rotated = await this.sessions.rotate(previousId);
       if (rotated) {
         sessionId = rotated;
         // logId, never sessionId: the id is a bearer credential and this line

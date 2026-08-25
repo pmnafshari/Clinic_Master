@@ -31,6 +31,7 @@ import { ToolExecutorService } from '../../src/modules/voice/tools/tool-executor
 import { AuditService } from '../../src/modules/audit/audit.service';
 import { IdempotencyService } from '../../src/modules/voice/idempotency/idempotency.service';
 import { VOICE_BROWSER_FLAG } from '../../src/modules/voice/voice-browser.config';
+import { redisTestProvider, testRedis } from './redis-test-util';
 
 const ORIGIN = 'http://localhost:3000';
 
@@ -81,6 +82,7 @@ async function startServer(enabled: boolean): Promise<{ app: INestApplication; u
     { provide: PrismaService, useValue: { patient: { findUnique: async () => null } } },
     VoiceGateway,
     VoiceTurnRunner,
+    redisTestProvider(),
     VoiceSessionStore,
     TransportMetricsService,
     ToolRegistryService,

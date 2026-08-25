@@ -100,12 +100,40 @@ string `true` enables anything.
 - **The transport cannot reach a tool.** Every tool call goes through `ToolExecutorService`,
   which makes the tier decision and writes the audit row — including for blocked calls.
 
-### Single-process constraint
+### Shared state and required Redis configuration
 
-Voice session and idempotency state lives **in process**. Running more than one API
-instance with `VOICE_BROWSER_ENABLED=true` needs sticky routing, or a caller's second turn
-lands in a process that has never heard of their session. `APP_INSTANCES` documents the
-intent; moving this state to Redis is a later phase.
+Voice session and idempotency state lives in **Redis**, so any instance can serve any
+caller's next turn. `APP_INSTANCES` and the single-process startup warning no longer
+describe a limitation — they remain only as a reminder to point every instance at the
+same Redis.
+
+**Production Redis must be configured with a memory ceiling and an eviction policy.**
+This is not optional and `docker-compose.yml` does not provide it outside local
+development:
+
+```
+maxmemory        <sized for your deployment, e.g. 256mb>
+maxmemory-policy volatile-lru
+```
+
+*Why a TTL alone is not enough.* Every key carries one — 30 minutes for a session, 15 for
+an idempotency result — but a TTL bounds how long a key lives, not how many exist at once.
+Session keys are created from caller traffic, so a burst can accumulate faster than the TTL
+retires them. The in-process stores used to cap this by entry count; Redis has no such cap,
+so the ceiling has to come from configuration.
+
+*Why `volatile-lru` and not `allkeys-lru`.* Every key this application writes has a TTL, so
+the two behave identically today. `volatile-lru` additionally guarantees that a key written
+later **without** a TTL cannot be silently evicted.
+
+*Why not the default `noeviction`.* A full Redis then starts refusing writes, which takes
+voice down across every instance at once. Evicting the oldest expiring key degrades one
+conversation instead.
+
+*What eviction costs.* Losing a session key ends that conversation; the caller reconnects
+and starts a new one. Losing an idempotency key allows a booking to be retried — the
+database is still the backstop there, with `Serializable` transactions and the exclusion
+constraint that prevents provider double-booking.
 
 ### External provider verification — outstanding
 

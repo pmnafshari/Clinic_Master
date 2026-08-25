@@ -64,6 +64,16 @@ jobs:
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/smileflow_test?schema=public
 
+      # Service containers cannot override the image command, so the memory
+      # ceiling is applied at runtime instead. It has to match docker-compose:
+      # the resource-bound tests assert against the configured policy, and a
+      # default `noeviction` Redis would let them pass for the wrong reason.
+      - name: Configure Redis memory policy
+        run: |
+          redis-cli -h localhost -p 6379 CONFIG SET maxmemory 256mb
+          redis-cli -h localhost -p 6379 CONFIG SET maxmemory-policy volatile-lru
+          redis-cli -h localhost -p 6379 CONFIG GET maxmemory-policy
+
       - run: npm run test
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/smileflow_test?schema=public

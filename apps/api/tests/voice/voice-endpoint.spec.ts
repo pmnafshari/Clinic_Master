@@ -24,6 +24,7 @@ import { ToolRegistryService } from '../../src/modules/voice/tools/tool-registry
 import { ToolExecutorService } from '../../src/modules/voice/tools/tool-executor.service';
 import { AuditService } from '../../src/modules/audit/audit.service';
 import { VOICE_FEATURE_FLAG } from '../../src/modules/voice/voice.config';
+import { redisTestProvider, testRedis } from './redis-test-util';
 
 /**
  * A stand-in Anthropic client. No test in this file touches the network, and
@@ -54,6 +55,7 @@ async function buildApp(options: {
   const moduleRef: TestingModule = await Test.createTestingModule({
     controllers: [VoiceController],
     providers: [
+      redisTestProvider(),
       VoiceSessionStore,
       VoiceTicketService,
       ToolRegistryService,
@@ -316,6 +318,7 @@ describe('POST /api/voice/text — rate limiting', () => {
       controllers: [VoiceController],
       providers: [
       VoiceSessionStore,
+      redisTestProvider(),
       VoiceTicketService,
         ToolRegistryService,
         ToolExecutorService,
@@ -536,6 +539,7 @@ describe('POST /api/voice/text — history is bounded across a long conversation
       controllers: [VoiceController],
       providers: [
       VoiceSessionStore,
+      redisTestProvider(),
       VoiceTicketService,
         ToolRegistryService,
         ToolExecutorService,

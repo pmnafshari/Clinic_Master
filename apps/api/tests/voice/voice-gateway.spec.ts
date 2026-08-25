@@ -20,6 +20,7 @@ import { ToolRegistryService } from '../../src/modules/voice/tools/tool-registry
 import { ToolExecutorService } from '../../src/modules/voice/tools/tool-executor.service';
 import { AuditService } from '../../src/modules/audit/audit.service';
 import { IdempotencyService } from '../../src/modules/voice/idempotency/idempotency.service';
+import { redisTestProvider, testRedis } from './redis-test-util';
 
 export class FakeTransport implements AudioTransport {
   readonly sent: ServerFrame[] = [];
@@ -76,6 +77,7 @@ async function buildGateway() {
       VoiceGateway,
       VoiceTurnRunner,
       TransportMetricsService,
+      redisTestProvider(),
       VoiceSessionStore,
       ToolRegistryService,
       ToolExecutorService,
@@ -142,7 +144,7 @@ describe('voice gateway', () => {
 
     await gateway.handleFrame(transport, { type: 'session.start' });
     const id = readyId(transport);
-    const before = store.get(id);
+    const before = await store.get(id);
 
     await gateway.handleFrame(transport, {
       type: 'turn.text',
@@ -151,10 +153,10 @@ describe('voice gateway', () => {
     });
 
     expect(transport.sent.at(-1)).toEqual({ type: 'error', code: 'bad_frame' });
-    const after = store.get(id);
+    const after = await store.get(id);
     expect(after?.session.patientId).toBeNull();
     expect(after?.session.identityVerified).toBe(false);
-    expect(after).toBe(before);
+    expect(after).toEqual(before);
   });
 
   it('does not reach the agent at all for a rejected frame', async () => {
@@ -194,7 +196,7 @@ describe('turn.text reaches the approved agent path', () => {
     expect(agentCalls).toEqual(['what are your hours?']);
     // The agent advanced the server-side turn counter — proof the turn went
     // through respond(), not around it.
-    expect(store.get(id)?.session.turnIndex).toBe(1);
+    expect((await store.get(id))?.session.turnIndex).toBe(1);
   });
 
   it('routes tool calls through ToolExecutorService, never around it', async () => {
@@ -231,6 +233,7 @@ describe('turn.text reaches the approved agent path', () => {
         VoiceTurnRunner,
         TransportMetricsService,
         VoiceSessionStore,
+        redisTestProvider(),
         ToolRegistryService,
         ToolExecutorService,
         ClaudeAgentService,
