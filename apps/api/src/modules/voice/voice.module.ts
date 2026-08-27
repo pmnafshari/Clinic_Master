@@ -31,6 +31,7 @@ import { VoiceTurnRunner } from './transport/voice-turn-runner';
 import { TransportMetricsService } from './transport/transport-metrics.service';
 import { VoiceSocketGateway } from './transport/voice-socket.gateway';
 import { VOICE_BROWSER_CONFIG, VOICE_BROWSER_FLAG } from './voice-browser.config';
+import { AudioFormat } from './speech/audio-format';
 import { SPEECH_TO_TEXT_FACTORY } from './speech/speech-to-text.interface';
 import { DeepgramSttService } from './speech/deepgram-stt.service';
 import { TEXT_TO_SPEECH_FACTORY } from './speech/text-to-speech.interface';
@@ -56,10 +57,10 @@ import { VOICE_CONFIG, VOICE_FEATURE_FLAG } from './voice.config';
     { provide: VOICE_BROWSER_FLAG, useValue: VOICE_BROWSER_CONFIG },
     // A new recogniser per connection — see SPEECH_TO_TEXT_FACTORY. Binding
     // the class directly would hand every concurrent caller the same socket.
-    { provide: SPEECH_TO_TEXT_FACTORY, useValue: () => new DeepgramSttService() },
+    { provide: SPEECH_TO_TEXT_FACTORY, useValue: (format?: AudioFormat) => new DeepgramSttService(format) },
     // Same lifecycle: one synthesiser per connection, so one caller hanging up
     // cannot cancel everybody else's audio.
-    { provide: TEXT_TO_SPEECH_FACTORY, useValue: () => new ElevenLabsTtsService() },
+    { provide: TEXT_TO_SPEECH_FACTORY, useValue: (format?: AudioFormat) => new ElevenLabsTtsService(format) },
     { provide: VOICE_FEATURE_FLAG, useValue: VOICE_CONFIG },
     ToolRegistryService,
     ToolExecutorService,

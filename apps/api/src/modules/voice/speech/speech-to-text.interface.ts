@@ -1,4 +1,5 @@
 import { VoiceSession } from '../session/voice-session';
+import { AudioFormat } from './audio-format';
 
 /**
  * DI token for a FACTORY, not an instance.
@@ -16,7 +17,7 @@ import { VoiceSession } from '../session/voice-session';
  */
 export const SPEECH_TO_TEXT_FACTORY = Symbol('SPEECH_TO_TEXT_FACTORY');
 
-export type SpeechToTextFactory = () => SpeechToText;
+export type SpeechToTextFactory = (format?: AudioFormat) => SpeechToText;
 
 /**
  * Below this, the transport asks the caller to repeat instead of guessing.

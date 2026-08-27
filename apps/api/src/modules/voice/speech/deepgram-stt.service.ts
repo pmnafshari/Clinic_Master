@@ -5,10 +5,15 @@ import { Injectable, Logger } from '@nestjs/common';
 import { WebSocket, RawData } from 'ws';
 import { VoiceSession } from '../session/voice-session';
 import { SpeechToText, SttFinal } from './speech-to-text.interface';
+import { AudioFormat, BROWSER_AUDIO_FORMAT, sttWireFormat } from './audio-format';
 
-/** Uplink audio format. The browser downsamples to this before sending. */
-export const STT_ENCODING = 'linear16';
-export const STT_SAMPLE_RATE = 16000;
+/**
+ * Uplink audio format for the browser, which downsamples to this before
+ * sending. Kept as named constants because the browser contract is pinned to
+ * them; the phone channel supplies its own format instead.
+ */
+export const STT_ENCODING = sttWireFormat(BROWSER_AUDIO_FORMAT).encoding;
+export const STT_SAMPLE_RATE = sttWireFormat(BROWSER_AUDIO_FORMAT).sampleRate;
 
 /**
  * Silence, in milliseconds, before Deepgram calls an utterance finished.
@@ -83,6 +88,22 @@ export class DeepgramSttService implements SpeechToText {
   private partialHandlers: Array<(text: string) => void> = [];
   private finalHandlers: Array<(result: SttFinal) => void | Promise<void>> = [];
 
+  /**
+   * The channel's format, fixed for the life of this recogniser.
+   *
+   * Defaults to the browser's so that every existing caller keeps the exact
+   * behaviour it had; the phone channel passes its own.
+   */
+  constructor(private readonly format: AudioFormat = BROWSER_AUDIO_FORMAT) {}
+
+  /**
+   * Opens the provider socket. Separated so a test can observe the URL that
+   * was built without standing up a real connection.
+   */
+  protected open(url: string, key: string): WebSocket {
+    return new WebSocket(url, { headers: { Authorization: `Token ${key}` } });
+  }
+
   async start(session: VoiceSession): Promise<void> {
     const key = process.env.DEEPGRAM_API_KEY;
     if (!key) {
@@ -90,17 +111,16 @@ export class DeepgramSttService implements SpeechToText {
       throw new Error('DEEPGRAM_API_KEY is not configured');
     }
 
+    const wire = sttWireFormat(this.format);
     const query = new URLSearchParams({
-      encoding: STT_ENCODING,
-      sample_rate: String(STT_SAMPLE_RATE),
+      encoding: wire.encoding,
+      sample_rate: String(wire.sampleRate),
       channels: '1',
       interim_results: 'true',
       endpointing: String(STT_ENDPOINTING_MS),
     });
 
-    const socket = new WebSocket(`${DEEPGRAM_URL}?${query.toString()}`, {
-      headers: { Authorization: `Token ${key}` },
-    });
+    const socket = this.open(`${DEEPGRAM_URL}?${query.toString()}`, key);
 
     this.socket = socket;
 

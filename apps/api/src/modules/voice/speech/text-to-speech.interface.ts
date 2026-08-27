@@ -1,3 +1,5 @@
+import { AudioFormat } from './audio-format';
+
 /**
  * DI token for a FACTORY, not an instance.
  *
@@ -8,7 +10,7 @@
  */
 export const TEXT_TO_SPEECH_FACTORY = Symbol('TEXT_TO_SPEECH_FACTORY');
 
-export type TextToSpeechFactory = () => TextToSpeech;
+export type TextToSpeechFactory = (format?: AudioFormat) => TextToSpeech;
 
 /**
  * The seam between a reply and whatever speaks it.

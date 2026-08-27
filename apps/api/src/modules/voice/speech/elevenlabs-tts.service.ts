@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { TextToSpeech } from './text-to-speech.interface';
+import { AudioFormat, BROWSER_AUDIO_FORMAT, ttsOutputFormat } from './audio-format';
 
 const API_BASE = 'https://api.elevenlabs.io/v1/text-to-speech';
 
@@ -26,6 +27,15 @@ export class ElevenLabsTtsService implements TextToSpeech {
   private controller?: AbortController;
   private cancelled = false;
 
+  /**
+   * The channel's format, fixed for the life of this synthesiser.
+   *
+   * Defaults to the browser's, which means no `output_format` on the request at
+   * all — the provider default is what the deployed widget already plays, and
+   * naming it explicitly would change the bytes it receives.
+   */
+  constructor(private readonly format: AudioFormat = BROWSER_AUDIO_FORMAT) {}
+
   async *synthesise(text: string): AsyncIterable<Buffer> {
     const key = process.env.ELEVENLABS_API_KEY;
     if (!key) {
@@ -41,7 +51,10 @@ export class ElevenLabsTtsService implements TextToSpeech {
     const controller = new AbortController();
     this.controller = controller;
 
-    const response = await fetch(`${API_BASE}/${voiceId}/stream`, {
+    const output = ttsOutputFormat(this.format);
+    const query = output === null ? '' : `?output_format=${output}`;
+
+    const response = await fetch(`${API_BASE}/${voiceId}/stream${query}`, {
       method: 'POST',
       headers: {
         'xi-api-key': key,
