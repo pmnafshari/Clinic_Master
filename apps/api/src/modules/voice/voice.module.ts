@@ -23,6 +23,8 @@ import { VoiceController } from './voice.controller';
 import { VoiceSessionStore } from './session/voice-session.store';
 import { voiceRedisProvider, VoiceRedisLifecycle } from './session/redis.provider';
 import { VoiceTicketService } from './session/voice-ticket.service';
+import { OtpService } from './otp/otp.service';
+import { LoggingSmsSender, SMS_SENDER } from './otp/sms-sender.interface';
 import { VerifiedIdentityService } from './session/verified-identity.service';
 import { VoiceGateway } from './transport/voice.gateway';
 import { VoiceTurnRunner } from './transport/voice-turn-runner';
@@ -44,6 +46,8 @@ import { VOICE_CONFIG, VOICE_FEATURE_FLAG } from './voice.config';
     VoiceRedisLifecycle,
     VoiceSessionStore,
     VoiceTicketService,
+    OtpService,
+    { provide: SMS_SENDER, useClass: LoggingSmsSender },
     VerifiedIdentityService,
     VoiceGateway,
     VoiceTurnRunner,
