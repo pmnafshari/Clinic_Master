@@ -17,6 +17,9 @@ import { PatientIntakeTool } from './tools/patient-intake.tool';
 import { BookAppointmentTool } from './tools/book-appointment.tool';
 import { RescheduleAppointmentTool } from './tools/reschedule-appointment.tool';
 import { CancelAppointmentTool } from './tools/cancel-appointment.tool';
+import { RequestVerificationCodeTool } from './tools/request-verification-code.tool';
+import { SubmitVerificationCodeTool } from './tools/submit-verification-code.tool';
+import { PhoneLookupService } from './otp/phone-lookup.service';
 import { IdempotencyService } from './idempotency/idempotency.service';
 import { ClaudeAgentService } from './agent/claude.agent';
 import { VoiceController } from './voice.controller';
@@ -74,6 +77,9 @@ import { VOICE_CONFIG, VOICE_FEATURE_FLAG } from './voice.config';
     BookAppointmentTool,
     RescheduleAppointmentTool,
     CancelAppointmentTool,
+    RequestVerificationCodeTool,
+    SubmitVerificationCodeTool,
+    PhoneLookupService,
     IdempotencyService,
   ],
   exports: [ToolRegistryService, ToolExecutorService, VoiceSessionStore],
@@ -90,7 +96,9 @@ export class VoiceModule implements OnModuleInit {
     private patientIntake: PatientIntakeTool,
     private bookAppointment: BookAppointmentTool,
     private rescheduleAppointment: RescheduleAppointmentTool,
-    private cancelAppointment: CancelAppointmentTool
+    private cancelAppointment: CancelAppointmentTool,
+    private requestVerificationCode: RequestVerificationCodeTool,
+    private submitVerificationCode: SubmitVerificationCodeTool
   ) {}
 
   onModuleInit(): void {
@@ -104,5 +112,7 @@ export class VoiceModule implements OnModuleInit {
     this.registry.register(this.bookAppointment);
     this.registry.register(this.rescheduleAppointment);
     this.registry.register(this.cancelAppointment);
+    this.registry.register(this.requestVerificationCode);
+    this.registry.register(this.submitVerificationCode);
   }
 }

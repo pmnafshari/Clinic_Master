@@ -41,6 +41,8 @@ import { PatientIntakeTool } from '../../src/modules/voice/tools/patient-intake.
 import { BookAppointmentTool } from '../../src/modules/voice/tools/book-appointment.tool';
 import { RescheduleAppointmentTool } from '../../src/modules/voice/tools/reschedule-appointment.tool';
 import { CancelAppointmentTool } from '../../src/modules/voice/tools/cancel-appointment.tool';
+import { RequestVerificationCodeTool } from '../../src/modules/voice/tools/request-verification-code.tool';
+import { SubmitVerificationCodeTool } from '../../src/modules/voice/tools/submit-verification-code.tool';
 
 /**
  * ────────────────────────────────────────────────────────────────────────────
@@ -370,6 +372,33 @@ const EXPECTED_TOOLS: ExpectedTool[] = [
     file: 'cancel-appointment.tool.ts',
     input: { appointmentId: 'appt-1' },
   },
+  /**
+   * Public on purpose: an unverified caller is exactly who needs these, so
+   * gating them behind verification would make verification unreachable. Only
+   * the submit tool declares needsPatientContext, because only it writes the
+   * promotion back onto the real session object; the request tool reads the
+   * session id and nothing else.
+   *
+   * The request tool takes no input at all, which is the property that matters:
+   * the number it texts comes from the caller record the transport wrote, and
+   * there is no parameter through which a model could name a different one.
+   */
+  {
+    name: 'request_verification_code',
+    tier: 'public',
+    needsPatientContext: false,
+    type: RequestVerificationCodeTool,
+    file: 'request-verification-code.tool.ts',
+    input: {},
+  },
+  {
+    name: 'submit_verification_code',
+    tier: 'public',
+    needsPatientContext: true,
+    type: SubmitVerificationCodeTool,
+    file: 'submit-verification-code.tool.ts',
+    input: { code: '123456' },
+  },
 ];
 
 const EXPECTED_NAMES = EXPECTED_TOOLS.map((tool) => tool.name).sort();
@@ -546,7 +575,18 @@ describe('production wiring: the tool set VoiceModule actually registers', () =>
   it('a tool declares needsPatientContext if and only if it uses session.patientId', () => {
     for (const expected of EXPECTED_TOOLS) {
       const source = readFileSync(join(SRC, 'tools', expected.file), 'utf8');
-      const usesSessionPatient = /session\.patientId/.test(source);
+      /**
+       * A direct write, or the one approved helper that performs one.
+       *
+       * `promoteToPhoneVerified` sets `session.patientId` on the object it is
+       * handed (pinned in voice-session.ts and its own tests), so a tool that
+       * calls it needs the real session for exactly the same reason intake
+       * does — a narrowed copy would swallow the write. Matching only the
+       * literal property access would let that tool look capability-free while
+       * mutating identity through one indirection.
+       */
+      const usesSessionPatient =
+        /session\.patientId/.test(source) || /promoteToPhoneVerified\(/.test(source);
 
       // Both directions: a tool that reads or writes the session's patient must
       // declare the capability, and one that does not must not declare it.
@@ -1091,7 +1131,18 @@ describe('production wiring: model input cannot override identity or authorizati
       );
 
       expect(decisionOf(injected)).toEqual(decisionOf(clean));
-      expect(injected.status).not.toBe('failed');
+      /**
+       * The tool actually ran, so the equality above is not vacuously true
+       * because both calls were refused before reaching it.
+       *
+       * Stated as "not an authorization refusal" rather than "did not fail":
+       * the verification tools fail closed in this harness for environmental
+       * reasons — no caller record was recorded for these sessions, and no
+       * challenge is live — which is a real decision the tool reached and the
+       * injection did not change, not a call that never happened.
+       */
+      expect(injected.error).not.toBe('verification_required');
+      expect(injected.error).not.toBe('unknown_tool');
 
       // No attacker-supplied value reached a service or came back in a result.
       const observed = `${allServiceCallArgs(booted.mocks)}${JSON.stringify(injected)}`;

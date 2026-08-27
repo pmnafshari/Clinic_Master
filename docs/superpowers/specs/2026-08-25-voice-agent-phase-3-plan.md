@@ -821,6 +821,35 @@ even when the likely cause is infrastructure.
 
 ---
 
+## 5a. Follow-up scope created by F-4 — not implemented in Phase 3
+
+**Normalized `phoneE164` field + controlled backfill + normalize-on-write.**
+
+F-4 matches a caller's E.164 number against `Patient.phone` by exact string
+equality, ruled 2026-08-25. That is an authentication boundary and it is
+deliberately narrow: no normalization, no country guessing, no partial or suffix
+matching, no `libphonenumber`.
+
+**Recorded product limitation.** The development dataset contains **no** E.164
+`Patient.phone` values — 118 rows, 0 beginning with `+`, 117 containing
+punctuation, and one value (`555-1234567`) shared by 112 patients. Phone
+verification is therefore **operationally inert until patient phone data is
+migrated**. Successful phone verification requires appropriately stored E.164
+patient data. This is stated rather than worked around; the matching rule was
+not loosened to accommodate legacy rows.
+
+The future task must:
+
+- be separately planned and reviewed;
+- define exactly which legacy values can be **deterministically** converted, and
+  leave every non-convertible value unverifiable — a 7-digit `555-0101` has no
+  derivable E.164 form and must stay unmatched;
+- never use country guessing or partial matching;
+- include migration and backfill tests;
+- **not modify F-4's authentication rule.**
+
+---
+
 ## 6. Explicitly out of scope
 
 - Barge-in / interruption detection (the Twilio `clear` event is noted as the
