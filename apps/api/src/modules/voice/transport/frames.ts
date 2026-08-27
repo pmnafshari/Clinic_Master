@@ -41,6 +41,8 @@ const FORBIDDEN_KEYS = new Set([
   'user_id',
   'identityVerified',
   'identity_verified',
+  'verifiedUntil',
+  'verified_until',
   'turnIndex',
   'turn_index',
   'idempotencyNonce',

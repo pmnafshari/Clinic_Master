@@ -18,6 +18,7 @@ import { ClaudeAgentService } from './agent/claude.agent';
 import { createAnonymousSession } from './session/voice-session';
 import { Conversation, VoiceSessionStore } from './session/voice-session.store';
 import { privilegeChanged, snapshotPrivilege } from './session/privilege-change';
+import { isVerificationActive } from './session/verification';
 import { VoiceTicketService } from './session/voice-ticket.service';
 
 import { VoiceTextDto } from './dto/voice-text.dto';
@@ -228,7 +229,10 @@ export class VoiceController {
       sessionId: authoritativeId,
       reply: turn.reply,
       toolCalls: turn.toolCalls,
-      verified: conversation.session.identityVerified,
+      // Effective, not the raw flag. A phone session whose deadline has passed
+      // is refused by the tool gate, and reporting it as verified here would
+      // have the API contradict its own authorization on the same request.
+      verified: isVerificationActive(conversation.session),
       turnIndex: conversation.session.turnIndex,
     };
   }

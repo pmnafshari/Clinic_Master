@@ -61,7 +61,25 @@ export interface VoiceSession {
 
   userId: string | null;
   patientId: string | null;
+
   identityVerified: boolean;
+
+  /**
+   * Absolute deadline for `identityVerified`, in epoch milliseconds.
+   *
+   * `null` means verified for the lifetime of the session, and is the browser
+   * case: the JWT was checked at connect, so the connection is the grant and
+   * the session TTL is the only bound that applies.
+   *
+   * A number is the phone case. A one-time code proves control of a phone
+   * number, which is a much weaker credential than a JWT, so the access it
+   * grants is time-boxed independently of how long the call lasts.
+   *
+   * Meaningless on its own — it grants nothing when `identityVerified` is
+   * false, and authorization never reads it directly. See `isVerificationActive`.
+   */
+  verifiedUntil: number | null;
+
   turnIndex: number;
 }
 
@@ -73,6 +91,7 @@ export function createAnonymousSession(sessionId: string = newOpaqueId()): Voice
     userId: null,
     patientId: null,
     identityVerified: false,
+    verifiedUntil: null,
     turnIndex: 0,
   };
 }
@@ -89,6 +108,31 @@ export function createVerifiedSession(
     userId,
     patientId,
     identityVerified: true,
+    // No deadline. The browser's grant is its authenticated connection, which
+    // the session outlives by exactly nothing.
+    verifiedUntil: null,
     turnIndex: 0,
   };
+}
+
+/**
+ * Promotes a live session to phone-verified, for a bounded time.
+ *
+ * Mutates in place, deliberately. The OTP tool declares `needsPatientContext`,
+ * and `ToolExecutorService` hands such a tool the real session object rather
+ * than a clone precisely so its writes survive the turn — the same mechanism
+ * `PatientIntakeTool` already uses to bind a patientId. A clone would swallow
+ * the promotion.
+ *
+ * Unlike the browser constructors this never mints a session: verification
+ * happens mid-call, on the session the caller already has.
+ */
+export function promoteToPhoneVerified(
+  session: VoiceSession,
+  grant: { userId: string | null; patientId: string; now: number; ttlMs: number }
+): void {
+  session.userId = grant.userId;
+  session.patientId = grant.patientId;
+  session.identityVerified = true;
+  session.verifiedUntil = grant.now + grant.ttlMs;
 }

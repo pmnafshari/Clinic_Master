@@ -41,7 +41,21 @@ export class VoiceSessionStore {
     if (!raw) {
       return undefined;
     }
-    return JSON.parse(raw) as Conversation;
+    const conversation = JSON.parse(raw) as Conversation;
+
+    /**
+     * Records written before `verifiedUntil` existed parse with the key
+     * absent. Normalizing here means authorization sees one shape whatever
+     * wrote the record.
+     *
+     * `null` is the correct value rather than merely a safe one: before this
+     * field existed, the browser constructor was the only thing that could set
+     * the flag, so every such record is a browser session and has no deadline.
+     * An in-flight caller is not logged out by the deploy.
+     */
+    conversation.session.verifiedUntil = conversation.session.verifiedUntil ?? null;
+
+    return conversation;
   }
 
   /**

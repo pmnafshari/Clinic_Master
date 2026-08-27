@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ToolRegistryService } from './tool-registry.service';
 import { VoiceToolResult } from './tool-definition.interface';
 import { VoiceSession } from '../session/voice-session';
+import { isVerificationActive } from '../session/verification';
 import { AuditService } from '../../audit/audit.service';
 
 @Injectable()
@@ -44,7 +45,7 @@ export class ToolExecutorService {
       return { status: 'failed', error: 'unknown_tool' };
     }
 
-    if (tool.tier === 'verified' && !session.identityVerified) {
+    if (tool.tier === 'verified' && !isVerificationActive(session)) {
       // logId, never sessionId: the sessionId is a bearer credential, and a
       // log reader must not be able to resume the conversation it names.
       this.logger.warn(`Blocked ${toolName} for unverified session ${session.logId}`);
@@ -117,7 +118,18 @@ export class ToolExecutorService {
           status: result.status,
           error: typeof result.error === 'string' ? result.error : null,
           turnIndex: session.turnIndex,
+          /**
+           * Raw and effective, plus the deadline that separates them.
+           *
+           * The raw flag alone would let the record contradict the decision it
+           * describes: an expired phone session is refused by the gate above
+           * while `identityVerified` is still true, and an audit trail saying
+           * "verified" next to "verification_required" is worse than useless
+           * to whoever reads it later.
+           */
           identityVerified: session.identityVerified,
+          verificationActive: isVerificationActive(session),
+          verifiedUntil: session.verifiedUntil ?? null,
         },
       });
     } catch (error) {
