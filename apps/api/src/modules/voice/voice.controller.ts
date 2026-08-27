@@ -33,8 +33,8 @@ export { SESSION_TTL_MS, MAX_ACTIVE_SESSIONS } from './session/voice-session.sto
  * Every turn resends the whole history, so cost is quadratic in turn count and
  * an unbounded transcript eventually exceeds the context window — a 400 that
  * ends the conversation permanently, since the stored history that caused it is
- * resent on every retry. BoundedTtlMap caps how MANY conversations are held,
- * not how large any one of them gets.
+ * resent on every retry. The session store's TTL bounds how MANY conversations
+ * are held, not how large any one of them gets.
  *
  * Twelve turns is chosen against the job: an intake-then-book conversation runs
  * roughly eight to ten turns, so a caller can complete one and still refer back
@@ -119,7 +119,7 @@ export class VoiceController {
   @ApiResponse({ status: 200, description: 'The ticket' })
   @ApiResponse({ status: 401, description: 'Not authenticated' })
   @ApiResponse({ status: 404, description: 'The voice agent is not enabled' })
-  ticket(@Request() req: { user?: { id: string } }): { ticket: string } {
+  async ticket(@Request() req: { user?: { id: string } }): Promise<{ ticket: string }> {
     if (!this.flag.enabled) {
       throw new NotFoundException('Voice agent is not enabled');
     }
@@ -131,7 +131,7 @@ export class VoiceController {
     }
 
     // Only the ticket goes back. No userId, no expiry hint, nothing to correlate.
-    return { ticket: this.tickets.issue(userId) };
+    return { ticket: await this.tickets.issue(userId) };
   }
 
   @Throttle({ default: { limit: 10, ttl: 60000 } })

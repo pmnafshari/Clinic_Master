@@ -117,7 +117,7 @@ describe('a ticketed socket that sends immediately is still verified', () => {
   afterAll(async () => { await app.close(); });
 
   it('binds the ticketed identity even when session.start wins the race', async () => {
-    const ticket = tickets.issue('user-owner');
+    const ticket = await tickets.issue('user-owner');
     const browser = new Browser();
     await browser.connect(`${url}?ticket=${ticket}`);
 

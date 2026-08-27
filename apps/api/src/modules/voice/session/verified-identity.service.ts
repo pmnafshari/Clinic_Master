@@ -28,7 +28,7 @@ export class VerifiedIdentityService {
   ) {}
 
   async resolve(ticket: string): Promise<VerifiedIdentity | null> {
-    const userId = this.tickets.consume(ticket);
+    const userId = await this.tickets.consume(ticket);
     if (!userId) {
       return null;
     }

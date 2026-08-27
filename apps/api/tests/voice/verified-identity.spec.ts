@@ -4,12 +4,14 @@ import { join } from 'path';
 import { VerifiedIdentityService } from '../../src/modules/voice/session/verified-identity.service';
 import { VoiceTicketService } from '../../src/modules/voice/session/voice-ticket.service';
 import { PrismaService } from '../../src/prisma/prisma.service';
+import { redisTestProvider } from './redis-test-util';
 
 async function build(patientForUser: Record<string, string | null>) {
   const moduleRef = await Test.createTestingModule({
     providers: [
       VerifiedIdentityService,
       VoiceTicketService,
+      redisTestProvider(),
       {
         provide: PrismaService,
         useValue: {
@@ -33,14 +35,14 @@ async function build(patientForUser: Record<string, string | null>) {
 describe('server-side identity binding', () => {
   it('resolves a ticket to the patient linked to that user', async () => {
     const { identity, tickets } = await build({ 'user-1': 'patient-1' });
-    const ticket = tickets.issue('user-1');
+    const ticket = await tickets.issue('user-1');
 
     expect(await identity.resolve(ticket)).toEqual({ userId: 'user-1', patientId: 'patient-1' });
   });
 
   it('refuses a user with no linked patient rather than half-verifying', async () => {
     const { identity, tickets } = await build({ 'staff-1': null });
-    const ticket = tickets.issue('staff-1');
+    const ticket = await tickets.issue('staff-1');
 
     // A staff account has a User but no Patient. Returning a userId with no
     // patientId would leave a session verified with nothing to act on.
@@ -49,7 +51,7 @@ describe('server-side identity binding', () => {
 
   it('fails closed on an unknown, malformed or already-used ticket', async () => {
     const { identity, tickets } = await build({ 'user-1': 'patient-1' });
-    const used = tickets.issue('user-1');
+    const used = await tickets.issue('user-1');
     await identity.resolve(used);
 
     expect(await identity.resolve(used)).toBeNull();
@@ -76,10 +78,10 @@ describe('server-side identity binding', () => {
   it('two users resolve to their own patients only', async () => {
     const { identity, tickets } = await build({ 'user-a': 'patient-a', 'user-b': 'patient-b' });
 
-    expect(await identity.resolve(tickets.issue('user-a'))).toEqual({
+    expect(await identity.resolve(await tickets.issue('user-a'))).toEqual({
       userId: 'user-a', patientId: 'patient-a',
     });
-    expect(await identity.resolve(tickets.issue('user-b'))).toEqual({
+    expect(await identity.resolve(await tickets.issue('user-b'))).toEqual({
       userId: 'user-b', patientId: 'patient-b',
     });
   });

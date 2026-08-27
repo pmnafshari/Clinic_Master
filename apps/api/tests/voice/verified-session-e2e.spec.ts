@@ -118,7 +118,7 @@ describe('a ticketed browser session reaches Tier 2 through the real module', ()
   afterAll(async () => { await app.close(); });
 
   it('starts verified from a ticket and reaches a Tier 2 tool', async () => {
-    const ticket = tickets.issue('user-owner');
+    const ticket = await tickets.issue('user-owner');
     const browser = new Browser();
     await browser.connect(`${url}?ticket=${ticket}`);
 
@@ -168,7 +168,7 @@ describe('a ticketed browser session reaches Tier 2 through the real module', ()
   }, 30000);
 
   it('fails closed on a reused ticket', async () => {
-    const ticket = tickets.issue('user-owner');
+    const ticket = await tickets.issue('user-owner');
     const first = new Browser();
     await first.connect(`${url}?ticket=${ticket}`);
     first.send({ type: 'session.start' });
@@ -186,7 +186,7 @@ describe('a ticketed browser session reaches Tier 2 through the real module', ()
   }, 30000);
 
   it('does not verify a user with no linked patient', async () => {
-    const ticket = tickets.issue('staff-no-patient');
+    const ticket = await tickets.issue('staff-no-patient');
     const browser = new Browser();
     await browser.connect(`${url}?ticket=${ticket}`);
     browser.send({ type: 'session.start' });
