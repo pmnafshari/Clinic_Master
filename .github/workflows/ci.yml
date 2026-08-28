@@ -98,6 +98,16 @@ jobs:
           JWT_SECRET: test-secret-key-for-ci
           JWT_REFRESH_SECRET: test-refresh-key-for-ci
           REDIS_URL: redis://localhost:6379
+          # A fixed, non-secret value: the suite needs a stable HMAC key, and
+          # this one protects nothing because no real code is ever hashed here.
+          OTP_HMAC_SECRET: test-otp-hmac-secret-for-ci
+          # Off, and no Twilio credentials anywhere in this job. CI never
+          # places a call and never sends an SMS: every phone test drives a
+          # fake sender and a fake socket, the same rule that keeps CI talking
+          # to Anthropic and nobody else. A credential here would be one an
+          # attacker could bill.
+          VOICE_PHONE_ENABLED: 'false'
+          SMS_PROVIDER: logging
 
   build:
     name: Build

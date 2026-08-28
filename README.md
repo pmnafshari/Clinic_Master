@@ -76,8 +76,9 @@ fallback, not a failure — the turn still completes. The Phase 0 text endpoint,
 | `VOICE_AGENT_ENABLED` | `false` | The text endpoint returns 404 when off |
 | `VOICE_BROWSER_ENABLED` | `false` | The `/voice` socket closes immediately when off, issuing no session |
 | `NEXT_PUBLIC_VOICE_BROWSER_ENABLED` | `false` | The public page renders no widget when off |
+| `VOICE_PHONE_ENABLED` | `false` | The Twilio webhook answers every call with `<Reject/>` when off, minting no ticket and opening no media stream |
 
-All three are **default-deny**: absent reads the same as false, and only the exact
+All four are **default-deny**: absent reads the same as false, and only the exact
 string `true` enables anything.
 
 ### Security notes
@@ -148,11 +149,35 @@ production deployment, confirm with real credentials:
 
 Unit and contract coverage is not a substitute for either.
 
+### Phone channel
+
+Patients can call the clinic. An inbound call reaches a signed Twilio webhook, which
+mints a single-use ticket and returns TwiML pointing Twilio at a media-stream socket;
+audio runs μ-law 8 kHz in both directions with no transcoding anywhere.
+
+A phone caller starts anonymous. Caller ID is a hint and never proof, so reaching
+anything patient-specific means proving control of the number already on file: a
+one-time code is texted there, and submitting it correctly verifies the session **for
+a bounded window** rather than for the life of the call. When that window lapses the
+next Tier-2 request is refused on the same open connection.
+
+The number must match **exactly one** patient. Zero matches and several matches are
+refused identically, so a caller cannot learn which happened.
+
+**Operating it — enabling the channel, rotating `OTP_HMAC_SECRET`, what fails when
+Redis is down, and which metrics exist — is documented in
+[docs/voice-phone-runbook.md](docs/voice-phone-runbook.md).**
+
+Phone verification requires patient phone numbers stored in E.164. The match is exact
+string equality, deliberately: a fuzzy authentication check is not a lesser version of
+authentication. Records held in other formats cannot be matched, and migrating them is
+separate, planned work.
+
 ### Not in this phase
 
-Identity verification · authenticated voice sessions · Tier 2 activation · barge-in
-(the `cancel()` contract exists and is used for teardown only) · Redis · telephony ·
-conversation persistence · analytics.
+Barge-in (the `cancel()` contract exists and is used for teardown only) · voicemail ·
+call recording · conversation persistence · analytics · outbound calling · warm
+transfer to a human · multi-language.
 
 ## Tech stack
 

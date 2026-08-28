@@ -646,7 +646,7 @@ browser:
 | `TWILIO_VOICE_WEBHOOK_URL` | the URL signatures are validated against |
 | `OTP_HMAC_SECRET` | code and phone-key hashing |
 | `VOICE_PHONE_ENABLED` | default-deny phone channel flag |
-| `SMS_PROVIDER` | gains a reader; `mock` \| `twilio` |
+| `SMS_PROVIDER` | gains a reader; `logging` \| `twilio` |
 
 `.env.example`, README, `docker-compose`, CI workflow, and an operator runbook
 covering: enabling the channel, rotating `OTP_HMAC_SECRET`, what happens when
@@ -666,12 +666,18 @@ still work), and how to read the OTP metrics counters.
 `evicted_keys`, with an alert on any non-zero eviction rate — under
 `volatile-lru` a live conversation is as evictable as a spent ticket.
 
+> **Authorized plan correction, 2026-08-25.** These two references previously
+> read `mock`. F-3 established that `mock` is an unsupported value that fails
+> closed, and that `logging` is the safe non-delivery provider (unset selects it
+> too). The correction was explicitly authorized rather than applied silently,
+> and F-3 is not reopened: no mock provider or alias is added.
+
 ### Environment matrix
 
 | | local dev | CI | staging / tunnel | production |
 |---|---|---|---|---|
 | `VOICE_PHONE_ENABLED` | `false` unless testing | `false` | `true` | `true` |
-| `SMS_PROVIDER` | `mock` | `mock` | `twilio` | `twilio` |
+| `SMS_PROVIDER` | `logging` | `logging` | `twilio` | `twilio` |
 | Twilio credentials | absent | **absent** | real | real |
 | `TWILIO_VOICE_WEBHOOK_URL` | tunnel URL, exact | unset | tunnel/host URL | public host |
 | `OTP_HMAC_SECRET` | dev value | fixed test value | secret | secret |

@@ -68,6 +68,19 @@ services:
       JWT_EXPIRATION: 15m
       FRONTEND_URL: http://localhost:3000
       PORT: 3001
+      # Phone channel: default-deny, and off in local compose. Turning it on
+      # also needs a publicly reachable TWILIO_VOICE_WEBHOOK_URL, which a
+      # compose network does not provide — see the runbook.
+      VOICE_PHONE_ENABLED: ${VOICE_PHONE_ENABLED:-false}
+      # Sends nothing unless a deployment explicitly asks for twilio.
+      SMS_PROVIDER: ${SMS_PROVIDER:-logging}
+      # Server-side only, and empty by default: no credential is baked into a
+      # compose file. Supply them from the shell or an env file when testing.
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
+      TWILIO_PHONE_NUMBER: ${TWILIO_PHONE_NUMBER:-}
+      TWILIO_VOICE_WEBHOOK_URL: ${TWILIO_VOICE_WEBHOOK_URL:-}
+      OTP_HMAC_SECRET: ${OTP_HMAC_SECRET:-}
     depends_on:
       postgres:
         condition: service_healthy
