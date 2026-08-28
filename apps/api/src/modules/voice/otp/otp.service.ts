@@ -132,6 +132,29 @@ export class OtpService {
     }
   }
 
+  /**
+   * Removes everything this call left behind.
+   *
+   * Named keys only. A KEYS or SCAN sweep would be O(keyspace) and would put
+   * every other live call's state within reach of one hang-up. TTLs remain as a
+   * backstop for calls that end without ever reaching here.
+   */
+  async forgetCall(sessionId: string): Promise<void> {
+    try {
+      await this.redis.del(
+        callerKey(sessionId),
+        codeKey(sessionId),
+        attemptsKey(sessionId),
+        cooldownKey(sessionId),
+        lockKey(sessionId)
+      );
+    } catch {
+      // The TTLs already bound every one of these; a failed cleanup costs
+      // nothing but a little memory for a few minutes.
+      this.logger.warn('otp.cleanup failed');
+    }
+  }
+
   /** The key a number is counted under. Exposed so tests can assert its shape. */
   async phoneKeyFor(phoneE164: string): Promise<string> {
     return `voice:otp:req:${this.hmac(phoneE164)}`;

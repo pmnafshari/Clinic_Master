@@ -21,6 +21,7 @@ import { RequestVerificationCodeTool } from './tools/request-verification-code.t
 import { SubmitVerificationCodeTool } from './tools/submit-verification-code.tool';
 import { PhoneLookupService } from './otp/phone-lookup.service';
 import { PhoneWebhookController } from './transport/phone-webhook.controller';
+import { TwilioMediaGateway } from './transport/twilio-media.gateway';
 import { IdempotencyService } from './idempotency/idempotency.service';
 import { ClaudeAgentService } from './agent/claude.agent';
 import { VoiceController } from './voice.controller';
@@ -52,6 +53,7 @@ import { VOICE_CONFIG, VOICE_FEATURE_FLAG } from './voice.config';
     VoiceSessionStore,
     VoiceTicketService,
     OtpService,
+    TwilioMediaGateway,
     smsSenderProvider,
     VerifiedIdentityService,
     VoiceGateway,

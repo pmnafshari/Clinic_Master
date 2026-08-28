@@ -1,3 +1,4 @@
+import { AudioFormat, BROWSER_AUDIO_FORMAT } from '../speech/audio-format';
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import {
   isUsableFinal,
@@ -32,6 +33,8 @@ import { VoiceTurnRunner } from './voice-turn-runner';
 /** Per-connection counters. Transport bookkeeping, never session state. */
 interface ConnectionState {
   sessionId: string;
+  /** Chosen by the transport at connect. Browser unless a channel says otherwise. */
+  audioFormat: AudioFormat;
   turns: number;
   recentTurnsAt: number[];
   /** Lazily started on the first audio chunk: a text-only session opens no provider stream. */
@@ -96,6 +99,12 @@ export class VoiceGateway {
    * session that already exists. Holding the promise lets the start path wait
    * for the answer instead of racing it.
    */
+  /**
+   * A connection's audio format, registered by its transport before the session
+   * opens. Absent means the browser's, so every existing caller is unchanged.
+   */
+  private readonly pendingFormat = new WeakMap<AudioTransport, AudioFormat>();
+
   private readonly pendingIdentity = new WeakMap<
     AudioTransport,
     Promise<VerifiedIdentity | null>
@@ -134,6 +143,21 @@ export class VoiceGateway {
    */
   bindIdentity(transport: AudioTransport, identity: Promise<VerifiedIdentity | null>): void {
     this.pendingIdentity.set(transport, identity);
+  }
+
+  /**
+   * Records the codec this connection speaks, before any frame is read.
+   *
+   * The transport owns this decision because only it knows what channel it is.
+   * Nothing below here learns what Twilio is; it receives a format.
+   */
+  bindAudioFormat(transport: AudioTransport, format: AudioFormat): void {
+    this.pendingFormat.set(transport, format);
+  }
+
+  /** The session a live socket holds, for cleanup that must be key-scoped. */
+  sessionIdFor(transport: AudioTransport): string | undefined {
+    return this.connections.get(transport)?.sessionId;
   }
 
   async handleFrame(transport: AudioTransport, raw: unknown): Promise<void> {
@@ -193,6 +217,7 @@ export class VoiceGateway {
 
       this.connections.set(transport, {
         sessionId,
+        audioFormat: this.pendingFormat.get(transport) ?? BROWSER_AUDIO_FORMAT,
         turns: 0,
         recentTurnsAt: [],
         sttFailed: false,
@@ -296,7 +321,7 @@ export class VoiceGateway {
     if (!state.stt) {
       // One recogniser per connection. Sharing one would mean this caller's
       // handlers also fire for every other caller's transcript.
-      const recogniser = this.sttFactory?.();
+      const recogniser = this.sttFactory?.(state.audioFormat);
       if (!recogniser) {
         state.sttFailed = true;
         transport.send({ type: 'error', code: 'stt_unavailable' });
@@ -567,7 +592,7 @@ export class VoiceGateway {
       return this.ttsFactory?.();
     }
     if (!state.tts) {
-      state.tts = this.ttsFactory?.();
+      state.tts = this.ttsFactory?.(state.audioFormat);
     }
     return state.tts;
   }
