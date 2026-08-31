@@ -1,9 +1,22 @@
 /**
  * Phase 0 is text-only. The flag stays false until a phase is deliberately
  * switched on in an environment.
+ *
+ * The two environment-backed values are getters rather than plain properties,
+ * which is load-bearing rather than stylistic. A module-level property is
+ * evaluated when this file is first imported, and Nest resolves a root module's
+ * imports *before* its decorator calls `ConfigModule.forRoot()` — so the value
+ * was fixed before `.env` had been parsed, and a deployment that configured the
+ * model or the flag in `.env` silently got the default instead. Reading at
+ * access time removes the ordering question entirely.
+ *
+ * `VOICE_BROWSER_CONFIG` already worked this way; this brings the two into
+ * line.
  */
 export const VOICE_CONFIG = {
-  enabled: process.env.VOICE_AGENT_ENABLED === 'true',
+  get enabled(): boolean {
+    return process.env.VOICE_AGENT_ENABLED === 'true';
+  },
   /**
    * Overridable so the same agent can run against a gateway that fronts the
    * Anthropic Messages API, which requires vendor-prefixed model ids. The
@@ -14,7 +27,9 @@ export const VOICE_CONFIG = {
    * An empty value reads as unset. A blank environment variable is a
    * configuration mistake, not a request for a model named "".
    */
-  model: process.env.VOICE_AGENT_MODEL || 'claude-opus-5',
+  get model(): string {
+    return process.env.VOICE_AGENT_MODEL || 'claude-opus-5';
+  },
   // Thinking is deliberately left at its adaptive default. Disabling it on
   // Opus 5 can cause tool calls to be emitted as plain text, which completes
   // the turn without running the tool — a silent booking failure.

@@ -1,4 +1,8 @@
 import { readFileSync, readdirSync, statSync } from 'fs';
+import {
+  VOICE_CONFIG,
+  VoiceFeatureFlag,
+} from '../../src/modules/voice/voice.config';
 import { join } from 'path';
 
 const SRC = join(__dirname, '../../src');
@@ -49,6 +53,75 @@ describe('the agent model is configurable', () => {
     // A gateway that fronts the same API needs vendor-prefixed ids, which is
     // the whole reason this is configurable.
     expect((await loadConfig()).model).toBe('anthropic/claude-sonnet-4.5');
+  });
+});
+
+describe('voice configuration is read when it is used, not when it is imported', () => {
+  const model = process.env.VOICE_AGENT_MODEL;
+  const enabled = process.env.VOICE_AGENT_ENABLED;
+
+  afterEach(() => {
+    const restore = (k: string, v: string | undefined) => {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    };
+    restore('VOICE_AGENT_MODEL', model);
+    restore('VOICE_AGENT_ENABLED', enabled);
+  });
+
+  /**
+   * The bug this pins.
+   *
+   * `VOICE_CONFIG` is imported at the top of this file, so its module body ran
+   * before any of these assignments. Nest has the same ordering: a root
+   * module's imports resolve before its decorator calls
+   * `ConfigModule.forRoot()`, so a value read into a plain property at import
+   * time is fixed before `.env` is ever parsed — and a deployment that
+   * configured the model in `.env` silently got the default instead.
+   */
+  it('sees a model set after the module was imported', () => {
+    process.env.VOICE_AGENT_MODEL = 'anthropic/claude-sonnet-4.5';
+
+    expect(VOICE_CONFIG.model).toBe('anthropic/claude-sonnet-4.5');
+  });
+
+  it('sees the flag set after the module was imported', () => {
+    process.env.VOICE_AGENT_ENABLED = 'true';
+
+    expect(VOICE_CONFIG.enabled).toBe(true);
+  });
+
+  it('follows a value that changes between reads', () => {
+    process.env.VOICE_AGENT_MODEL = 'openrouter/free';
+    expect(VOICE_CONFIG.model).toBe('openrouter/free');
+
+    delete process.env.VOICE_AGENT_MODEL;
+    expect(VOICE_CONFIG.model).toBe('claude-opus-5');
+  });
+
+  it('keeps the flag default-deny for anything but the exact string', () => {
+    for (const value of ['TRUE', '1', 'yes', 'false', '']) {
+      process.env.VOICE_AGENT_ENABLED = value;
+      expect(VOICE_CONFIG.enabled).toBe(false);
+    }
+    delete process.env.VOICE_AGENT_ENABLED;
+    expect(VOICE_CONFIG.enabled).toBe(false);
+  });
+
+  it('leaves the constants alone — they never came from the environment', () => {
+    // Named here so a future edit cannot quietly make either configurable:
+    // both were tuned against the default model.
+    expect(VOICE_CONFIG.maxTokens).toBe(8192);
+    expect(VOICE_CONFIG.effort).toBe('low');
+  });
+
+  it('still satisfies the feature-flag contract it is injected under', () => {
+    process.env.VOICE_AGENT_ENABLED = 'true';
+    // voice.module binds VOICE_CONFIG itself as VOICE_FEATURE_FLAG, so the
+    // object must keep behaving like a plain { enabled: boolean }.
+    const flag: VoiceFeatureFlag = VOICE_CONFIG;
+
+    expect(flag.enabled).toBe(true);
   });
 });
 
