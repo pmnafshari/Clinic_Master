@@ -47,10 +47,17 @@ export default function TreatmentPlansPage() {
   const [newDescription, setNewDescription] = useState('');
   const [newError, setNewError] = useState<string | null>(null);
 
-  const { data: plans, isLoading } = useQuery<TreatmentPlan[]>({
+  const { data: plans, isLoading, error } = useQuery<TreatmentPlan[]>({
     queryKey: ['treatment-plans'],
     queryFn: () => apiClient.get('/treatment-plans').then((res) => res.data),
+    // A role that may not read treatment plans gets a 403 on every attempt;
+    // retrying cannot change that and only delays the message.
+    retry: (count, err) =>
+      (err as { response?: { status?: number } })?.response?.status === 403 ? false : count < 2,
   });
+
+  const status = (error as { response?: { status?: number } } | null)?.response?.status;
+  const forbidden = status === 403;
 
   const { data: patients } = useQuery<PatientOption[]>({
     queryKey: ['patients-list'],
@@ -105,7 +112,9 @@ export default function TreatmentPlansPage() {
           <h2 className="text-2xl font-bold text-gray-900">Treatment Plans</h2>
           <p className="text-gray-600">Manage patient treatment plans</p>
         </div>
-        <Button onClick={() => setShowNewModal(true)}>
+        {/* Hidden when the role cannot read plans; the API refuses the write
+            regardless, and offering the action only invites a dead end. */}
+        <Button onClick={() => setShowNewModal(true)} disabled={forbidden}>
           <Plus className="mr-2 h-4 w-4" />
           New Plan
         </Button>
@@ -165,6 +174,23 @@ export default function TreatmentPlansPage() {
             <Card key={i}><CardContent className="p-6"><Skeleton className="h-6 w-32 mb-4" /><Skeleton className="h-4 w-48 mb-2" /><Skeleton className="h-4 w-24" /></CardContent></Card>
           ))}
         </div>
+      ) : forbidden ? (
+        <Card>
+          <CardContent className="py-12 text-center">
+            <p className="font-medium text-gray-900">You do not have access to treatment plans</p>
+            <p className="mt-1 text-sm text-gray-500">
+              Your role does not include clinical treatment plans. Ask an administrator if you
+              believe you should have access.
+            </p>
+          </CardContent>
+        </Card>
+      ) : error ? (
+        <Card>
+          <CardContent className="py-12 text-center">
+            <p className="font-medium text-gray-900">Treatment plans could not be loaded</p>
+            <p className="mt-1 text-sm text-gray-500">Please try again shortly.</p>
+          </CardContent>
+        </Card>
       ) : plans?.length === 0 ? (
         <Card><CardContent className="py-12 text-center"><p className="text-gray-500">No treatment plans yet</p></CardContent></Card>
       ) : (

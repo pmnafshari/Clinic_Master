@@ -20,6 +20,7 @@
     "db:generate": "turbo db:generate"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "prettier": "^3.2.0",
     "turbo": "^2.0.0"
   },

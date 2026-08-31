@@ -33,6 +33,27 @@ interface RegisterData {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+/**
+ * Brings a user record into the shape this context promises.
+ *
+ * The two endpoints that produce one disagree: `/auth/login` returns
+ * `role: "admin"`, while `/auth/me` returns the joined row,
+ * `role: { id, name: "admin", … }`. Every consumer here — the route guard, the
+ * sidebar, the header — compares `user.role` to a string, so an unmapped
+ * `/auth/me` response silently fails all of them: on a refresh the guard read
+ * an object, decided the role was not permitted, and bounced the user to the
+ * dashboard, which then failed the same check and rendered nothing.
+ *
+ * Normalising on the way in keeps that disagreement at the boundary instead of
+ * letting it leak into every comparison.
+ */
+function toUser(raw: unknown): User {
+  const data = raw as Omit<User, 'role'> & { role: UserRole | { name?: UserRole } };
+  const role = typeof data.role === 'string' ? data.role : data.role?.name;
+
+  return { ...data, role: role as UserRole };
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -47,7 +68,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const token = localStorage.getItem('accessToken');
       if (token) {
         const response = await apiClient.get('/auth/me');
-        setUser(response.data);
+        setUser(toUser(response.data));
       }
     } catch (error) {
       localStorage.removeItem('accessToken');
@@ -63,9 +84,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     localStorage.setItem('accessToken', accessToken);
     localStorage.setItem('refreshToken', refreshToken);
-    setUser(userData);
+    const user = toUser(userData);
+    setUser(user);
 
-    if (userData.role === 'patient') {
+    if (user.role === 'patient') {
       router.push('/portal');
     } else {
       router.push('/dashboard');
@@ -78,7 +100,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     localStorage.setItem('accessToken', accessToken);
     localStorage.setItem('refreshToken', refreshToken);
-    setUser(userData);
+    setUser(toUser(userData));
     router.push('/portal');
   };
 

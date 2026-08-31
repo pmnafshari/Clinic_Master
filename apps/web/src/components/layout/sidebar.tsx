@@ -196,7 +196,11 @@ export function Sidebar() {
 
                   return (
                     <Link
-                      key={item.href}
+                      // Title, not href: two items in this nav legitimately
+                      // point at the same route, and keying on the href made
+                      // React treat them as one — dropping a link and warning
+                      // about duplicate keys on every staff page.
+                      key={item.title}
                       href={item.href}
                       title={collapsed ? item.title : undefined}
                       className={cn(

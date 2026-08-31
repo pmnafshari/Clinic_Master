@@ -4,6 +4,7 @@ import { ReportingService } from './reporting.service';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
+import { DateRangeDto, OptionalDateRangeDto } from './dto/date-range.dto';
 
 @ApiTags('reports')
 @Controller('reports')
@@ -18,11 +19,8 @@ export class ReportingController {
   @ApiQuery({ name: 'startDate', required: false })
   @ApiQuery({ name: 'endDate', required: false })
   @ApiResponse({ status: 200, description: 'Dashboard KPIs' })
-  async getDashboardKPIs(
-    @Query('startDate') startDate?: string,
-    @Query('endDate') endDate?: string
-  ) {
-    return this.reportingService.getDashboardKPIs(startDate, endDate);
+  async getDashboardKPIs(@Query() range: OptionalDateRangeDto) {
+    return this.reportingService.getDashboardKPIs(range.startDate, range.endDate);
   }
 
   @Get('revenue')
@@ -31,11 +29,8 @@ export class ReportingController {
   @ApiQuery({ name: 'startDate', required: true })
   @ApiQuery({ name: 'endDate', required: true })
   @ApiResponse({ status: 200, description: 'Revenue summary' })
-  async getRevenueSummary(
-    @Query('startDate') startDate: string,
-    @Query('endDate') endDate: string
-  ) {
-    return this.reportingService.getRevenueSummary(startDate, endDate);
+  async getRevenueSummary(@Query() range: DateRangeDto) {
+    return this.reportingService.getRevenueSummary(range.startDate, range.endDate);
   }
 
   @Get('appointments')
@@ -44,11 +39,8 @@ export class ReportingController {
   @ApiQuery({ name: 'startDate', required: true })
   @ApiQuery({ name: 'endDate', required: true })
   @ApiResponse({ status: 200, description: 'Appointment stats' })
-  async getAppointmentStats(
-    @Query('startDate') startDate: string,
-    @Query('endDate') endDate: string
-  ) {
-    return this.reportingService.getAppointmentStats(startDate, endDate);
+  async getAppointmentStats(@Query() range: DateRangeDto) {
+    return this.reportingService.getAppointmentStats(range.startDate, range.endDate);
   }
 
   @Get('treatments')
@@ -57,11 +49,8 @@ export class ReportingController {
   @ApiQuery({ name: 'startDate', required: true })
   @ApiQuery({ name: 'endDate', required: true })
   @ApiResponse({ status: 200, description: 'Treatment acceptance' })
-  async getTreatmentAcceptance(
-    @Query('startDate') startDate: string,
-    @Query('endDate') endDate: string
-  ) {
-    return this.reportingService.getTreatmentAcceptance(startDate, endDate);
+  async getTreatmentAcceptance(@Query() range: DateRangeDto) {
+    return this.reportingService.getTreatmentAcceptance(range.startDate, range.endDate);
   }
 
   @Get('patients')
@@ -70,10 +59,7 @@ export class ReportingController {
   @ApiQuery({ name: 'startDate', required: true })
   @ApiQuery({ name: 'endDate', required: true })
   @ApiResponse({ status: 200, description: 'New patient stats' })
-  async getPatientStats(
-    @Query('startDate') startDate: string,
-    @Query('endDate') endDate: string
-  ) {
-    return this.reportingService.getPatientStats(startDate, endDate);
+  async getPatientStats(@Query() range: DateRangeDto) {
+    return this.reportingService.getPatientStats(range.startDate, range.endDate);
   }
 }

@@ -55,3 +55,10 @@ Thumbs.db
 
 # Docker volumes
 docker/data/
+
+# End-to-end test output — screenshots, traces and reports are regenerated
+# on every run and are not source.
+e2e-artifacts/
+e2e-results.json
+test-results/
+playwright-report/
