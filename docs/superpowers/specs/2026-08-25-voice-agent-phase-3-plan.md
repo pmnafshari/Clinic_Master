@@ -722,6 +722,55 @@ has **never been exercised against the live API**. If it is rejected, the phone
 TTS path fails closed and F-9 fails — it does not fall back to a resampler, and
 the design is not permitted to rest on the assumption.
 
+### RESULT — F-9: PARTIALLY VERIFIED (recorded 2026-08-31)
+
+**F-9 did not fully pass and is not marked as passing.** Provider/account
+restrictions prevented every test that requires a real carrier call, and those
+are recorded as blocked rather than waived.
+
+#### Live-verified
+
+Exercised against the running application through a public tunnel, with real
+provider calls to Deepgram and ElevenLabs:
+
+| Check | Evidence |
+|---|---|
+| Public webhook reachability | HTTP 200 through the tunnel |
+| Valid signature accepted | 200 with a correctly computed HMAC |
+| Forged signature rejected | 403, no detail in the body |
+| TwiML response and `text/xml` | `<Connect><Stream>` with a 43-char ticket |
+| One-time ticket minting and WS admission | socket accepted; ticket redeemed once |
+| WebSocket session lifecycle | open → turn → clean close |
+| Real μ-law 8 kHz uplink frames | 131 speech frames + 100 silence frames |
+| **Deepgram μ-law 8 kHz transcription** | live transcript, confidence 0.77 |
+| Claude agent execution | turn completed via the configured model |
+| `ToolExecutorService` / `CLINIC_INFO` | `get_clinic_info` executed |
+| **ElevenLabs `ulaw_8000` synthesis** | 97 frames / 99,939 bytes / 12.49s valid μ-law |
+| Returned audio validity | re-transcribed at confidence **1.00**, intelligible |
+| End-to-end voice turn | `turn.completed ms=7549` |
+| Session cleanup | OTP keys removed by name; no keyspace scan |
+| TTS retry behaviour | one retry observed, then success |
+
+**`output_format=ulaw_8000` is no longer an assumption.** It was the single
+documented-but-unverified item in the design, and it is now verified against the
+live ElevenLabs API.
+
+#### NOT VERIFIED — blocked by provider access
+
+| Item | Blocker |
+|---|---|
+| Real Twilio PSTN inbound call | account verification number banned |
+| Real PSTN carrier audio quality | requires a real call |
+| Real SMS delivery | same account restriction |
+| OTP end to end through a real PSTN caller | requires a verified caller on file |
+| **Twilio's own production signature generation** | the accepted signature was computed locally, not by Twilio |
+
+The last row matters most: the endpoint was proven to validate a correctly
+signed request against the configured URL, but **Twilio's own signing has never
+been observed**. Nothing here substitutes for that.
+
+---
+
 ### How this is actually executed — there is no staging environment
 
 Verified against the repository: the only workflows are `ci.yml` and
