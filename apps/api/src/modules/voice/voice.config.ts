@@ -4,7 +4,17 @@
  */
 export const VOICE_CONFIG = {
   enabled: process.env.VOICE_AGENT_ENABLED === 'true',
-  model: 'claude-opus-5',
+  /**
+   * Overridable so the same agent can run against a gateway that fronts the
+   * Anthropic Messages API, which requires vendor-prefixed model ids. The
+   * default is the model everything else here was tuned against — the system
+   * prompt, the adaptive-thinking decision below, and the token budget — so an
+   * override changes the agent's behaviour and is deliberately explicit.
+   *
+   * An empty value reads as unset. A blank environment variable is a
+   * configuration mistake, not a request for a model named "".
+   */
+  model: process.env.VOICE_AGENT_MODEL || 'claude-opus-5',
   // Thinking is deliberately left at its adaptive default. Disabling it on
   // Opus 5 can cause tool calls to be emitted as plain text, which completes
   // the turn without running the tool — a silent booking failure.
