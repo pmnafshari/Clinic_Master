@@ -6,7 +6,7 @@
     "build": "nest build",
     "dev": "nest start --watch",
     "start": "nest start",
-    "start:prod": "node dist/main",
+    "start:prod": "node dist/apps/api/src/main",
     "lint": "eslint \"{src,tests}/**/*.ts\"",
     "test": "jest",
     "test:watch": "jest --watch",
