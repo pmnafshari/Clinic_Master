@@ -12,6 +12,24 @@ export type ToolTier = 'public' | 'verified';
  */
 export interface VoiceToolResult {
   status: 'ok' | 'confirmed' | 'failed';
+
+  /**
+   * How to satisfy a prerequisite this call was missing, when there is one.
+   *
+   * Some failures are terminal — the slot is taken, the provider is gone — and
+   * the caller should be told plainly. Others are simply out of order: booking
+   * for someone who has not been registered yet cannot succeed, but registering
+   * them makes it succeed. Those two are indistinguishable when a failure
+   * carries only an opaque error code, and the agent was told to treat every
+   * failure as terminal, so a recoverable one ended the conversation.
+   *
+   * The server names the prerequisite because the server is what enforces it.
+   * This is guidance for the next step, never permission: the check that
+   * produced the failure still runs on the retry, and nothing here lets a tool
+   * be called that would otherwise be refused.
+   */
+  nextStep?: string;
+
   [key: string]: unknown;
 }
 

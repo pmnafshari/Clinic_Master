@@ -47,7 +47,21 @@ export class BookAppointmentTool implements VoiceTool {
   ): Promise<VoiceToolResult> {
     const patientId = session.patientId;
     if (!patientId) {
-      return { status: 'failed', error: 'no_patient_in_session' };
+      /**
+       * Recoverable, and said so explicitly.
+       *
+       * The session has no patient yet, which for a new caller simply means
+       * intake has not run. The booking is still refused here — that invariant
+       * is not negotiable and is what stops an appointment being created for
+       * nobody — but the agent is told what would make it possible instead of
+       * being left to infer it from an error code.
+       */
+      return {
+        status: 'failed',
+        error: 'no_patient_in_session',
+        nextStep:
+          'Register this caller with start_patient_intake first, then book again.',
+      };
     }
 
     const key = this.idempotency.keyFor(session, this.name, input);

@@ -5,6 +5,7 @@ import { ToolExecutorService } from '../tools/tool-executor.service';
 import { VoiceSession } from '../session/voice-session';
 import { VOICE_CONFIG } from '../voice.config';
 import { SYSTEM_PROMPT } from './system-prompt';
+import { createModelClient } from './model-client.provider';
 
 /**
  * The slice of the Anthropic client this service uses. Narrow on purpose: a
@@ -60,7 +61,7 @@ export class ClaudeAgentService {
    */
   private getClient(): AnthropicLike {
     if (!this.client) {
-      this.client = new Anthropic();
+      this.client = createModelClient();
     }
     return this.client;
   }

@@ -315,7 +315,7 @@ describe('write tools — routed through ToolExecutorService', () => {
       session
     );
 
-    expect(result).toEqual({ status: 'failed', error: 'no_patient_in_session' });
+    expect(result).toMatchObject({ status: 'failed', error: 'no_patient_in_session' });
     expect(appointments.create).not.toHaveBeenCalled();
   });
 
@@ -485,7 +485,7 @@ describe('write tools — routed through ToolExecutorService', () => {
     expect(session.patientId).toBeNull();
 
     const booking = await controlExecutor.execute('book_appointment', BOOKING_INPUT, session);
-    expect(booking).toEqual({ status: 'failed', error: 'no_patient_in_session' });
+    expect(booking).toMatchObject({ status: 'failed', error: 'no_patient_in_session' });
     expect(appointments.create).not.toHaveBeenCalled();
   });
 

@@ -138,13 +138,32 @@ describe('provider credentials stay out of the repository', () => {
     }
   });
 
-  it('never reads the key itself — that is the SDK\'s job', () => {
+  it('never handles a credential in the agent itself', () => {
     const agent = readFileSync(join(SRC, 'modules/voice/agent/claude.agent.ts'), 'utf8');
 
-    // A key this code touched is a key it could log. It never touches one.
+    // A key this code touched is a key it could log. The agent constructs no
+    // client and names no credential; both belong to the provider below.
     expect(agent).not.toMatch(/ANTHROPIC_API_KEY/);
+    expect(agent).not.toMatch(/Gemini_API_Key/i);
     expect(agent).not.toMatch(/apiKey/);
-    expect(agent).toContain('new Anthropic()');
+    expect(agent).not.toMatch(/new Anthropic\(/);
+    expect(agent).toContain('createModelClient()');
+  });
+
+  it('builds every model client in one place, from configuration', () => {
+    const provider = readFileSync(
+      join(SRC, 'modules/voice/agent/model-client.provider.ts'),
+      'utf8'
+    );
+
+    // Selection is explicit rather than inferred from whichever key happens to
+    // be set, so a deployment with both cannot silently change provider.
+    expect(provider).toContain('VOICE_AGENT_PROVIDER');
+    // A missing key fails loudly instead of falling back to another provider.
+    expect(provider).toMatch(/throw new Error\('Gemini_API_Key is not configured'\)/);
+
+    // And no key is logged or echoed anywhere in it.
+    expect(provider).not.toMatch(/console\.|logger\./);
   });
 
   it('hardcodes no model id anywhere but the documented default', () => {
