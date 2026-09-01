@@ -66,6 +66,16 @@ export class BookAppointmentTool implements VoiceTool {
 
     const key = this.idempotency.keyFor(session, this.name, input);
 
+    // One committed write per turn: the caller consented once, so at most
+    // one write may follow. See IdempotencyService.scopeFor.
+    const commit = {
+      scope: this.idempotency.scopeFor(session, this.name),
+      nextStep:
+        'An appointment is already booked for this caller in this turn. Tell ' +
+        'them the time that is booked and ask whether they want a second ' +
+        'appointment as well before booking anything further.',
+    };
+
     return this.idempotency.runOnce(key, async () => {
       const providers = await this.users.findProviders();
       if (!providers || providers.length === 0) {
@@ -91,6 +101,6 @@ export class BookAppointmentTool implements VoiceTool {
         // constraint all surface here. Never report this as booked.
         return { status: 'failed' as const, error: 'slot_unavailable' };
       }
-    });
+    }, commit);
   }
 }

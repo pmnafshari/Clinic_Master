@@ -582,12 +582,24 @@ describe('write tools — routed through ToolExecutorService', () => {
     expect(a.appointmentId).toBe(b.appointmentId);
   });
 
-  it('two DIFFERENT bookings in the same turn create two appointments', async () => {
-    // "Book me Tuesday and Thursday" is one assistant turn carrying two
-    // book_appointment blocks: same session, same turnIndex, same tool name,
-    // different input. Keyed without the input those two collapse onto one
-    // cache entry — the second caller is handed the FIRST appointment's id, one
-    // appointment exists, and the agent confirms two out loud.
+  it('two DIFFERENT bookings in the same turn produce one appointment and an honest refusal', async () => {
+    // This test used to assert that both bookings were created, on the reading
+    // that "book me Tuesday and Thursday" is one turn with two book_appointment
+    // blocks. That behaviour reached production and double-booked a caller: the
+    // model had offered two free times, the caller said only "yes", and the
+    // model hedged and booked both.
+    //
+    // The assertion was measuring the wrong property. The prompt requires the
+    // details to be read back and an explicit yes before any write, so a turn
+    // carries at most one consent, and a second write inside it is by
+    // construction one the caller never gave. Two appointments are still
+    // reachable — they take the two turns the caller needs to agree to them,
+    // which is covered in one-write-per-turn.spec.ts.
+    //
+    // What the input hash in the key is still for is visible here: it keeps the
+    // second call OFF the first's cache entry, so it reaches the turn guard and
+    // is refused honestly, instead of being handed the first appointment's id
+    // and a 'confirmed' the agent would read out as a second booking.
     const tuesday = {
       startTime: '2026-09-01T09:00:00.000Z',
       endTime: '2026-09-01T09:30:00.000Z',
@@ -609,12 +621,19 @@ describe('write tools — routed through ToolExecutorService', () => {
     const a = await executor.execute('book_appointment', tuesday, session);
     const b = await executor.execute('book_appointment', thursday, session);
 
-    expect(appointments.create).toHaveBeenCalledTimes(2);
+    expect(appointments.create).toHaveBeenCalledTimes(1);
     expect(a.status).toBe('confirmed');
-    expect(b.status).toBe('confirmed');
     expect(a.appointmentId).toBe('a-tue');
-    expect(b.appointmentId).toBe('a-thu');
-    expect(a.appointmentId).not.toBe(b.appointmentId);
+
+    // Refused, and never dressed up as the first booking: a 'confirmed' here,
+    // or Tuesday's id under a status the agent reads as success, is exactly how
+    // a caller gets told about an appointment that was not made for them.
+    expect(b.status).toBe('failed');
+    expect(b.error).toBe('already_committed_this_turn');
+    expect(b.nextStep).toEqual(expect.any(String));
+
+    // It still names what exists, so the agent can say what is actually booked.
+    expect(b.appointmentId).toBe('a-tue');
   });
 
   it('a verified session can go straight to booking without intake', async () => {

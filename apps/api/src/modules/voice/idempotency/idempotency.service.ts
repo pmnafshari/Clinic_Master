@@ -29,6 +29,48 @@ const OUTCOME_TTL_SECONDS = 30;
 /** A tool call that has not finished inside this has stopped being useful. */
 const LEASE_TTL_SECONDS = 30;
 
+/**
+ * Where a turn records that it has already committed a write.
+ *
+ * Distinct from the result cache above, which is keyed on the tool input and so
+ * only ever recognises a byte-identical retry. This one is keyed on the turn,
+ * because the turn — not the argument list — is the unit of caller consent.
+ */
+const COMMIT_PREFIX = 'voice:idem:committed:';
+
+/**
+ * Held only while the write is running. A process that dies mid-write frees the
+ * turn this quickly rather than wedging it for the full result TTL; a write
+ * that succeeds replaces this with the settled record below.
+ */
+const COMMIT_RESERVATION_TTL_SECONDS = 30;
+
+/** Compare-and-delete: release the reservation only if it is still ours. */
+const RELEASE_IF_MINE = `
+if redis.call('get', KEYS[1]) == ARGV[1] then
+  return redis.call('del', KEYS[1])
+end
+return 0`;
+
+/** Compare-and-set: promote our reservation to the settled record. */
+const SETTLE_IF_MINE = `
+if redis.call('get', KEYS[1]) == ARGV[1] then
+  return redis.call('set', KEYS[1], ARGV[2], 'EX', ARGV[3])
+end
+return 0`;
+
+/**
+ * What a tool must supply to have its turn closed by a successful write.
+ *
+ * `nextStep` is the tool's own words: the agent is told to treat a failure
+ * carrying one as out-of-order rather than impossible, so the refusal has to
+ * say what would make sense to do instead.
+ */
+export interface TurnCommit {
+  scope: string;
+  nextStep: string;
+}
+
 /** How long a loser waits for the winner's result before retrying itself. */
 const LEASE_WAIT_MS = 20_000;
 const LEASE_POLL_MS = 50;
@@ -81,14 +123,22 @@ export class IdempotencyService {
    * turn is the entire point of this class, and dropping it would collapse two
    * legitimate bookings in one conversation into one.
    *
-   * The tool input is in the key too, as a hash. A single assistant turn can
-   * carry several `tool_use` blocks of the same tool — "book me Tuesday and
-   * Thursday" is one turn with two `book_appointment` calls. Keyed on
-   * nonce:turn:tool alone those two share a key, the second joins the first's
-   * cache entry, and the agent narrates two appointments where one exists.
-   * Hashing the input separates them while leaving the property this class is
-   * for intact: a genuine retry replays byte-identical input, so it hashes to
-   * the same value and still de-duplicates.
+   * The tool input is in the key too, as a hash, and this is where this key
+   * stops. It answers one question only: is this the same call again? A genuine
+   * retry replays byte-identical input, hashes to the same value, and replays
+   * its result rather than writing twice.
+   *
+   * It deliberately does NOT decide whether a *different* call is allowed. A
+   * single assistant turn can carry several `tool_use` blocks of the same tool,
+   * and one of them booking Tuesday while another books Thursday is two keys
+   * here, correctly — collapsing them would hand the second caller the first
+   * appointment's id under a 'confirmed' status, and the agent would narrate
+   * two appointments where one exists.
+   *
+   * Whether that second write may happen at all is a separate question with a
+   * separate answer, one turn wide rather than one argument list wide: see
+   * `scopeFor`. Keeping the two apart is what lets a second booking be refused
+   * honestly instead of being disguised as the first one succeeding.
    *
    * Each component is still percent-encoded before joining, so ':' (and '%'
    * itself) cannot occur inside a component and the mapping from tuple to key
@@ -119,6 +169,27 @@ export class IdempotencyService {
   }
 
   /**
+   * The span within which a tool may commit at most one write: this session,
+   * this turn, this tool.
+   *
+   * Deliberately free of the tool input, which is exactly what `keyFor` adds.
+   * A model that is unsure between two offered times can emit two `tool_use`
+   * blocks in one assistant turn; hashed on their input those are two keys and
+   * both write. They are one turn, and the caller said yes once, so they are
+   * one write. The tool name stays in the scope so registering a patient does
+   * not also close the turn for the booking that follows it.
+   */
+  scopeFor(session: VoiceSession, toolName: string): string {
+    return [
+      String(session.idempotencyNonce),
+      String(session.turnIndex),
+      String(toolName),
+    ]
+      .map((part) => encodeURIComponent(part))
+      .join(':');
+  }
+
+  /**
    * Runs an operation once for a key, however many callers ask.
    *
    * Two things are true across every instance, not just this one:
@@ -134,12 +205,21 @@ export class IdempotencyService {
    */
   async runOnce(
     key: string,
-    operation: () => Promise<VoiceToolResult>
+    operation: () => Promise<VoiceToolResult>,
+    commit?: TurnCommit
   ): Promise<VoiceToolResult> {
     const resultKey = `${RESULT_PREFIX}${key}`;
     const leaseKey = `${LEASE_PREFIX}${key}`;
     const outcomeKey = `${OUTCOME_PREFIX}${key}`;
 
+    // A byte-identical retry is a resend, not a second write, and must replay
+    // its own confirmed result rather than be refused as though the caller had
+    // asked for something new. Reading the cache first is the cheap way there;
+    // it is not the only thing holding that property, since a retry that gets
+    // past here still matches its own reservation in `claimTurn` below and is
+    // let through. Both paths are kept: the ordering saves a round trip on
+    // every replay, the key check is what covers the concurrent case where
+    // there is no cached result to find yet.
     const cached = await this.readResult(resultKey);
     if (cached) {
       return cached;
@@ -153,16 +233,134 @@ export class IdempotencyService {
       return running;
     }
 
+    if (commit) {
+      const refused = await this.claimTurn(commit, key);
+      if (refused) {
+        return refused;
+      }
+    }
+
     const execution = this.executeOnce(key, resultKey, leaseKey, outcomeKey, operation);
     this.inFlight.set(key, execution);
 
     try {
-      return await execution;
+      const result = await execution;
+      if (commit) {
+        // A failure must leave the turn open: the slot was taken and the agent
+        // is expected to offer another, in this same turn.
+        await (result.status === 'confirmed'
+          ? this.settleTurn(commit, key, result)
+          : this.releaseTurn(commit, key));
+      }
+      return result;
+    } catch (error) {
+      // Released on the throw path too, or a write that blew up would hold the
+      // turn shut until the reservation expired.
+      if (commit) {
+        await this.releaseTurn(commit, key);
+      }
+      throw error;
     } finally {
       // Removed on both paths. An entry left behind would turn coalescing into
       // a cache, and a failure left behind would block every later retry.
       this.inFlight.delete(key);
     }
+  }
+
+  /**
+   * Takes the turn for this write, or refuses because another already has it.
+   *
+   * The reservation carries the key that made it, so a caller on another
+   * instance running the *same* key — a retry that crossed instances — is let
+   * through to the lease machinery below rather than refused. Only a genuinely
+   * different write is turned away.
+   */
+  private async claimTurn(
+    commit: TurnCommit,
+    key: string
+  ): Promise<VoiceToolResult | undefined> {
+    const commitKey = `${COMMIT_PREFIX}${commit.scope}`;
+    const reservation = JSON.stringify({ key, result: null });
+
+    const won = await this.redis.set(
+      commitKey,
+      reservation,
+      'EX',
+      COMMIT_RESERVATION_TTL_SECONDS,
+      'NX'
+    );
+    if (won) {
+      return undefined;
+    }
+
+    const raw = await this.redis.get(commitKey);
+    if (!raw) {
+      // Expired between the SET and the GET. Nothing holds the turn.
+      return undefined;
+    }
+
+    const held = JSON.parse(raw) as { key: string; result: VoiceToolResult | null };
+    if (held.key === key) {
+      return undefined;
+    }
+
+    return this.refuseTurn(held.result, commit.nextStep);
+  }
+
+  /** Promotes our reservation to the settled record, for the rest of the turn. */
+  private async settleTurn(
+    commit: TurnCommit,
+    key: string,
+    result: VoiceToolResult
+  ): Promise<void> {
+    await this.redis.eval(
+      SETTLE_IF_MINE,
+      1,
+      `${COMMIT_PREFIX}${commit.scope}`,
+      JSON.stringify({ key, result: null }),
+      JSON.stringify({ key, result }),
+      String(IDEMPOTENCY_TTL_MS / 1000)
+    );
+  }
+
+  /** Compare-and-delete, so a slow write cannot release a successor's claim. */
+  private async releaseTurn(commit: TurnCommit, key: string): Promise<void> {
+    await this.redis.eval(
+      RELEASE_IF_MINE,
+      1,
+      `${COMMIT_PREFIX}${commit.scope}`,
+      JSON.stringify({ key, result: null })
+    );
+  }
+
+  /**
+   * The refusal handed back to a second write in the same turn.
+   *
+   * It carries what was actually committed — the appointment id and time, or
+   * whatever else the settled result named — because the agent has to be able
+   * to tell the caller what they have. The one thing it never carries is the
+   * committed `status`: this call did not succeed, and a result that says
+   * "confirmed" is how a caller ends up being told about a booking that was
+   * never made for them.
+   */
+  private refuseTurn(
+    committed: VoiceToolResult | null,
+    nextStep: string
+  ): VoiceToolResult {
+    // Everything the committed write named, minus the two fields that would
+    // misreport this call: its 'confirmed' status, and a stale nextStep.
+    const details = Object.fromEntries(
+      Object.entries(committed ?? {}).filter(
+        ([field]) => field !== 'status' && field !== 'nextStep'
+      )
+    );
+
+    return {
+      ...details,
+      status: 'failed',
+      error: 'already_committed_this_turn',
+      nextStep,
+    };
   }
 
   /**

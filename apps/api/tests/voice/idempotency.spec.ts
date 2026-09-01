@@ -40,10 +40,15 @@ describe('IdempotencyService', () => {
 
   /**
    * The property the input hash exists for. A single assistant turn can emit
-   * two `book_appointment` blocks — "Tuesday and Thursday" — at the same
-   * turnIndex, with the same tool name and the same session. Without the input
-   * in the key those two are one key, the second joins the first's cache entry,
-   * and one appointment is narrated as two.
+   * two `book_appointment` blocks at the same turnIndex, with the same tool
+   * name and the same session. Without the input in the key those two are one
+   * key, the second joins the first's cache entry, and one appointment is
+   * narrated as two.
+   *
+   * Separate keys do not mean both writes execute — one write per turn is
+   * enforced by `scopeFor`, see one-write-per-turn.spec.ts. Separate keys mean
+   * the second is refused on its own terms rather than replayed as the first
+   * one's success.
    */
   it('gives two different inputs to the same tool in the same turn different keys', () => {
     const session = createVerifiedSession('s1', 'u1', 'p1');

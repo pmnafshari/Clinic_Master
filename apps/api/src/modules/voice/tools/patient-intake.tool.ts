@@ -46,6 +46,15 @@ export class PatientIntakeTool implements VoiceTool {
   ): Promise<VoiceToolResult> {
     const key = this.idempotency.keyFor(session, this.name, input);
 
+    // One committed write per turn: the caller consented once, so at most
+    // one write may follow. See IdempotencyService.scopeFor.
+    const commit = {
+      scope: this.idempotency.scopeFor(session, this.name),
+      nextStep:
+        'This caller has already been registered in this turn. Use the record ' +
+        'that exists rather than creating a second one.',
+    };
+
     const result = await this.idempotency.runOnce(key, async () => {
       try {
         const patient = await this.patients.create({
@@ -65,7 +74,7 @@ export class PatientIntakeTool implements VoiceTool {
       } catch {
         return { status: 'failed' as const, error: 'could_not_create_patient' };
       }
-    });
+    }, commit);
 
     // Bind the new patient to this session so booking can proceed. The only id
     // that can ever land here is one this call just created, so it cannot move

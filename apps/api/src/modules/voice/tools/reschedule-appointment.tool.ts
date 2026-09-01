@@ -55,6 +55,15 @@ export class RescheduleAppointmentTool implements VoiceTool {
 
     const key = this.idempotency.keyFor(session, this.name, input);
 
+    // One committed write per turn: the caller consented once, so at most
+    // one write may follow. See IdempotencyService.scopeFor.
+    const commit = {
+      scope: this.idempotency.scopeFor(session, this.name),
+      nextStep:
+        'An appointment has already been moved for this caller in this turn. Tell ' +
+        'them the new time and get a clear yes before moving anything else.',
+    };
+
     return this.idempotency.runOnce(key, async () => {
       try {
         const updated = await this.appointments.update(appointmentId, {
@@ -70,6 +79,6 @@ export class RescheduleAppointmentTool implements VoiceTool {
       } catch {
         return { status: 'failed' as const, error: 'slot_unavailable' };
       }
-    });
+    }, commit);
   }
 }
